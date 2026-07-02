@@ -7524,36 +7524,35 @@ function computePartialYearBaseline(metric, rute, method){
   }
 
   // Hitung fcMethodEst dari data historis (basis metode forecast)
+  // PENTING: dataArr HARUS difilter per rute (dom/int) — sebelumnya selalu pakai
+  // total gabungan meski rute='dom'/'int', menyebabkan fcMethodEst salah untuk
+  // rute selain 'all'.
   const yrsAll = (DB.hasData && DB.years.length>0) ? DB.years : getYears();
   let fcMethodEst = fullEstSeasonal;
   try{
-    // PENTING: pakai sumber data IDENTIK dengan getMetricData() di Forecasting Center
-    // agar getForecast() menghasilkan nilai yang sama persis
-    const partialMForYear = HIST.partial && HIST.partial[partialYrAnn] ? HIST.partial[partialYrAnn] : 0;
     const dataArr = yrsAll.map(y=>{
-      if(!DB.hasData) return 0;
       const isYrPartial = HIST.partial && HIST.partial[y] > 0;
+      // Tahun parsial: pakai fullEstSeasonal yang SUDAH difilter rute (dihitung di atas)
+      if(isYrPartial && y===partialYrAnn) return fullEstSeasonal;
+      if(!DB.hasData) return 0;
       if(metric==='pax'){
         if(DB.pax[y]){
-          if(isYrPartial){
-            // Partial year: pakai HIST.paxAnnual (full year estimate)
-            return +(HIST.paxAnnual[y]||0);
-          }
-          return +(DB.pax[y].total/1e6);
+          const val = rute==='dom' ? DB.pax[y].dom : rute==='int' ? DB.pax[y].intl : DB.pax[y].total;
+          return +(val/1e6);
         }
         return +(HIST.paxAnnual[y]||0);
       }
       if(metric==='ac'){
         if(DB.ac[y]){
-          if(isYrPartial) return +((HIST.acAnnual[y]||0)/1e3);
-          return +(DB.ac[y].total/1e3);
+          const val = rute==='dom' ? DB.ac[y].dom : rute==='int' ? DB.ac[y].intl : DB.ac[y].total;
+          return +(val/1e3);
         }
         return +((HIST.acAnnual[y]||0)/1e3);
       }
       if(metric==='cargo'){
         if(DB.cargo[y]){
-          if(isYrPartial) return +(HIST.cargoAnnual[y]||0);
-          return +(DB.cargo[y].total);
+          const val = rute==='dom' ? DB.cargo[y].dom : rute==='int' ? DB.cargo[y].intl : DB.cargo[y].total;
+          return +val;
         }
         return +(HIST.cargoAnnual[y]||0);
       }
@@ -7564,8 +7563,23 @@ function computePartialYearBaseline(metric, rute, method){
       return 0;
     }).filter(v=>v>0);
     if(dataArr.length>=2){
-      const fc = getForecast(method, dataArr, 1);
-      if(fc && fc.length>0 && isFinite(fc[0])) fcMethodEst = fc[0];
+      // Pipeline IDENTIK dengan fcBase di Forecasting Center: raw forecast →
+      // blend dengan CAGR industri → (opsional) floor pertumbuhan minimum.
+      // Sebelumnya langkah blend-industri ini TIDAK ada di sini, menyebabkan
+      // fcMethodEst (dan fullEst hasil blend) beda ~2% dari FC untuk metrik
+      // yang sama, karena FC memang menambahkan anchor industri 30% bobot.
+      const lastHistValue = dataArr[dataArr.length-1];
+      // PENTING: minta horizon 5 tahun (sama seperti default FC), BUKAN 1.
+      // getForecast() punya deteksi tren yang butuh >=2 titik hasil untuk aktif;
+      // horizon=1 membuat deteksi tren itu selalu nonaktif, menghasilkan
+      // fcMethodEst yang beda dari fcBase[0] versi FC meski dataArr identik.
+      const fcRaw5  = getForecast(method, dataArr, 5);
+      const fcRaw   = [fcRaw5[0]];
+      const fcBlend = blendWithIndustry(fcRaw, lastHistValue);
+      const fcFinal = INDUSTRY_PARAMS.minGrowthRate > 0
+        ? applyGrowthConstraint(fcBlend, lastHistValue)
+        : fcBlend;
+      if(fcFinal && fcFinal.length>0 && isFinite(fcFinal[0])) fcMethodEst = fcFinal[0];
     }
   }catch(e){ /* fallback ke fullEstSeasonal jika error */ }
 
@@ -8717,6 +8731,9 @@ function whatif(){
   if(W.maskapai===undefined)  W.maskapai=0;  // maskapai baru (jumlah)
   if(W.frekuensi===undefined) W.frekuensi=0; // tambah frekuensi per rute (%)
   if(W.selMetric===undefined) W.selMetric='pax';
+  if(W.selRute===undefined)   W.selRute='all';    // 'all'|'dom'|'int' — filter rute tampilan
+  if(W.selPeriod===undefined) W.selPeriod='yearly'; // 'yearly'|'monthly'
+  if(W.selYear===undefined)   W.selYear=null;      // diisi otomatis ke futYrs[0] saat render
   if(!STATE.WI_scenarios)   STATE.WI_scenarios=[];
 
   // Data aktual
@@ -8724,6 +8741,13 @@ function whatif(){
   const lastY  = yrs[yrs.length-1]||STATE.yrEnd;
   const HORIZON = 5;
   const futYrs  = Array.from({length:HORIZON},(_,i)=>lastY+i+1);
+  // Tahun berjalan (mis. 2026): Jan..partialM aktual, sisanya proyeksi — sama seperti FC/Risk
+  const partialYr = HIST.partial && Object.keys(HIST.partial).length>0
+    ? Math.max(...Object.keys(HIST.partial).map(Number)) : null;
+  const partialM  = partialYr ? (HIST.partial[partialYr]||0) : 0;
+  const hasPartialYear = !!(partialYr && partialM>0 && partialM<12 && yrs.includes(partialYr));
+  const displayYrs = hasPartialYear ? [partialYr, ...futYrs] : futYrs;
+  if(!W.selYear || !displayYrs.includes(W.selYear)) W.selYear = displayYrs[0];
 
   function getBase(metric){
     const vals = yrs.map(y=>{
@@ -8824,6 +8848,38 @@ function whatif(){
             ${[['holt-winters','Holt-Winters'],['linear','Regresi Linear'],['wma','WMA'],['exp','Exponential'],['holt-double','Holt Double'],['cagr','CAGR']].map(([v,l])=>
               `<option value="${v}" ${(W.method||'holt-winters')===v?'selected':''}>${l}</option>`
             ).join('')}
+          </select>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--t3);margin-bottom:4px">RUTE</div>
+          <div style="display:flex;background:var(--card2);border:1px solid var(--bdr);border-radius:7px;overflow:hidden">
+            ${[['all','🌐 Total'],['dom','✈ Dom'],['int','🌏 Int']].map(([v,l])=>`
+            <button onclick="STATE.WI.selRute='${v}';runWhatif()"
+              style="padding:5px 10px;font-size:10px;font-weight:600;border:none;cursor:pointer;
+                     background:${W.selRute===v?'var(--blue)':'transparent'};
+                     color:${W.selRute===v?'#fff':'var(--t2)'}" id="wi-rute-${v}">
+              ${l}
+            </button>`).join('')}
+          </div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--t3);margin-bottom:4px">PERIODE</div>
+          <div style="display:flex;background:var(--card2);border:1px solid var(--bdr);border-radius:7px;overflow:hidden">
+            ${[['yearly','Tahunan'],['monthly','Bulanan']].map(([v,l])=>`
+            <button onclick="STATE.WI.selPeriod='${v}';runWhatif()"
+              style="padding:5px 10px;font-size:10px;font-weight:600;border:none;cursor:pointer;
+                     background:${W.selPeriod===v?'var(--teal)':'transparent'};
+                     color:${W.selPeriod===v?'#fff':'var(--t2)'}" id="wi-period-${v}">
+              ${l}
+            </button>`).join('')}
+          </div>
+        </div>
+        <div id="wi-year-wrap" style="${W.selPeriod==='monthly'?'':'display:none'}">
+          <div style="font-size:9px;color:var(--t3);margin-bottom:4px">TAHUN</div>
+          <select id="wi-year-sel" onchange="STATE.WI.selYear=+this.value;runWhatif()"
+            style="padding:5px 10px;border-radius:7px;border:1px solid var(--bdr);
+                   background:var(--card2);color:var(--t1);font-size:11px">
+            ${displayYrs.map(y=>`<option value="${y}" ${(W.selYear||displayYrs[0])===y?'selected':''}>${y}${hasPartialYear&&y===partialYr?' (Berjalan)':''}</option>`).join('')}
           </select>
         </div>
       </div>
@@ -8938,22 +8994,42 @@ function runWhatif(silent){
   const lastY  = yrs[yrs.length-1]||STATE.yrEnd;
   const HORIZON = 5;
   const futYrs  = Array.from({length:HORIZON},(_,i)=>lastY+i+1);
+  const partialYr = HIST.partial && Object.keys(HIST.partial).length>0
+    ? Math.max(...Object.keys(HIST.partial).map(Number)) : null;
+  const partialM  = partialYr ? (HIST.partial[partialYr]||0) : 0;
+  const hasPartialYear = !!(partialYr && partialM>0 && partialM<12 && yrs.includes(partialYr));
+  const displayYrs = hasPartialYear ? [partialYr, ...futYrs] : futYrs;
 
-  // Ambil data historis per metrik
+  const rute = W.selRute||'all';
+
+  // Ambil data historis per metrik, per rute (dom/int/all).
+  // Untuk tahun parsial, pakai computePartialYearBaseline() — fungsi yang SAMA
+  // dipakai Forecasting Center & Risk & Scenario — agar baseline selalu identik.
   function getHistVals(m){
     const v = yrs.map(y=>{
-      if(m==='pax'){
-        if(DB.hasData&&DB.pax[y]) return +(DB.pax[y].total/1e6).toFixed(4);
-        return +(HIST.paxAnnual[y]||0);
+      const isPartial = HIST.partial && HIST.partial[y] > 0;
+      if(isPartial){
+        const pb = computePartialYearBaseline(m, rute, method);
+        if(pb && pb.partialYr===y) return +pb.fullEst.toFixed(6);
       }
-      if(m==='ac'){
-        if(DB.hasData&&DB.ac[y]) return +(DB.ac[y].total/1e3).toFixed(3);
-        return +((HIST.acAnnual[y]||0)/1e3).toFixed(3);
+      if(DB.hasData){
+        if(m==='pax' && DB.pax[y]){
+          const val = rute==='dom' ? DB.pax[y].dom : rute==='int' ? DB.pax[y].intl : DB.pax[y].total;
+          return +(val/1e6).toFixed(6);
+        }
+        if(m==='ac' && DB.ac[y]){
+          const val = rute==='dom' ? DB.ac[y].dom : rute==='int' ? DB.ac[y].intl : DB.ac[y].total;
+          return +(val/1e3).toFixed(3);
+        }
+        if(m==='cargo' && DB.cargo[y]){
+          const val = rute==='dom' ? DB.cargo[y].dom : rute==='int' ? DB.cargo[y].intl : DB.cargo[y].total;
+          return +val.toFixed(2);
+        }
       }
-      if(m==='cargo'){
-        if(DB.hasData&&DB.cargo[y]) return +(DB.cargo[y].total).toFixed(2);
-        return +((HIST.cargoAnnual[y]||0)).toFixed(2);
-      }
+      // Fallback: HIST annual (data demo, tidak ada breakdown rute presisi)
+      if(m==='pax')   return +(HIST.paxAnnual[y]||0);
+      if(m==='ac')    return +((HIST.acAnnual[y]||0)/1e3).toFixed(3);
+      if(m==='cargo') return +((HIST.cargoAnnual[y]||0)).toFixed(2);
       return 0;
     }).filter(v=>v>0);
     return v.length?v:[7.0];
@@ -8963,7 +9039,7 @@ function runWhatif(silent){
 
   // Jalankan baseline forecast
   function runFc(mth, data){
-    if(!data||data.length<2) return Array(HORIZON).fill(+(data[data.length-1]*1.03).toFixed(4));
+    if(!data||data.length<2) return Array(HORIZON).fill(+(data[data.length-1]*1.03).toFixed(6));
     try{
       switch(mth){
         case 'holt-winters': return forecastHoltWinters(data,HORIZON);
@@ -8974,7 +9050,7 @@ function runWhatif(silent){
         case 'cagr':         return forecastCAGR(data,HORIZON);
         default:             return forecastHoltWinters(data,HORIZON);
       }
-    }catch(e){ return Array(HORIZON).fill(+(histVals[histVals.length-1]*1.03).toFixed(4)); }
+    }catch(e){ return Array(HORIZON).fill(+(histVals[histVals.length-1]*1.03).toFixed(6)); }
   }
 
   const baseFc = runFc(method, histVals);
@@ -9017,7 +9093,7 @@ function runWhatif(silent){
 
   // Simulasi forecast: dampak tumbuh bertahap (year 1 = 40% full impact, dst)
   const rampUp = [0.4, 0.65, 0.82, 0.93, 1.0];
-  const simFc = baseFc.map((v,i)=>+(v*(1+totalImpact*rampUp[i]/100)).toFixed(4));
+  const simFc = baseFc.map((v,i)=>+(v*(1+totalImpact*rampUp[i]/100)).toFixed(6));
 
   const METRIC_CFG = {
     pax:   {label:'Penumpang', unit:'Juta',    color:'#3b82f6'},
@@ -9030,16 +9106,61 @@ function runWhatif(silent){
     'exp':'Exponential','holt-double':'Holt Double','cagr':'CAGR'
   }[method]||method;
 
+  // ── Tahun berjalan (Option B): bulan yang sudah aktual TIDAK disimulasikan
+  //    (sudah terjadi, tidak bisa diubah skenario hipotetis). Sisa bulan (proyeksi
+  //    musiman) kena dampak what-if dengan ramp tahun-1 (40%), sama seperti tahun
+  //    horizon pertama. Metodologi bulan proyeksi (fullEst × prop bulan) identik
+  //    dengan blok "bulan berjalan" di Forecasting Center.
+  let partialCalc = null;
+  if(hasPartialYear){
+    const fullEst = histVals[histVals.length-1]; // baseline tahun berjalan (dari computePartialYearBaseline di getHistVals)
+    const propP = computeMonthlyHistoricalProp(metric, rute, yrs);
+    const MONTHS_SHORT_P=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Ags','Sep','Okt','Nov','Des'];
+
+    function getActualMonthlyWI(mi){
+      if(metric==='pax'){
+        let arr = rute==='dom' ? (HIST.paxActualDom[partialYr]||[])
+                : rute==='int' ? (HIST.paxActualInt[partialYr]||[])
+                : (HIST.paxActual[partialYr]||[]);
+        if(arr.some(v=>v>0)) return (arr[mi]||0)/1e6;
+        const paxTot = (HIST.pax[partialYr]||[])[mi]||0;
+        if(rute==='dom'){ const p=DB.pax&&DB.pax[partialYr]&&DB.pax[partialYr].total>0?(DB.pax[partialYr].dom||0)/DB.pax[partialYr].total:0.75; return paxTot*p; }
+        if(rute==='int'){ const p=DB.pax&&DB.pax[partialYr]&&DB.pax[partialYr].total>0?(DB.pax[partialYr].intl||0)/DB.pax[partialYr].total:0.25; return paxTot*p; }
+        return paxTot;
+      }
+      if(metric==='ac'){
+        let arr = rute==='dom' ? (HIST.acDom[partialYr]||HIST.ac[partialYr]||[])
+                : rute==='int' ? (HIST.acInt[partialYr]||[])
+                : (HIST.ac[partialYr]||[]);
+        return (arr[mi]||0)/1e3;
+      }
+      let arr = rute==='dom' ? (HIST.cargoDom[partialYr]||HIST.cargo[partialYr]||[])
+              : rute==='int' ? (HIST.cargoInt[partialYr]||[])
+              : (HIST.cargo[partialYr]||[]);
+      return (arr[mi]||0);
+    }
+
+    const pMonthly = MONTHS_SHORT_P.map((mn,mi)=>{
+      const isActual = mi < partialM;
+      const bM = isActual ? getActualMonthlyWI(mi) : fullEst*(propP[mi]||1/12);
+      const sM = isActual ? bM : bM*(1+totalImpact*rampUp[0]/100);
+      return {mn, mi, isActual, bM:+bM.toFixed(6), sM:+sM.toFixed(6)};
+    });
+
+    const pAnnualSim = +pMonthly.reduce((s,m)=>s+m.sM,0).toFixed(6);
+    partialCalc = {partialYr, partialM, monthly:pMonthly, annualBaseline:+fullEst.toFixed(6), annualSim:pAnnualSim};
+  }
+
   // Simpan hasil untuk restore
-  STATE.WI._lastRun = {baseFc, simFc, futYrs, metric, method, totalImpact, extImpact, opImpact, histVals, yrs};
+  STATE.WI._lastRun = {baseFc, simFc, futYrs, metric, method, rute, totalImpact, extImpact, opImpact, histVals, yrs, partialCalc, hasPartialYear};
 
   // ── UPDATE UI ────────────────────────────────────────────────
 
   // Update chart title
   const ct=$('wi-chart-title');
-  if(ct) ct.textContent=`📈 Baseline vs Simulasi — ${mc.label}`;
+  if(ct) ct.textContent=`📈 Baseline vs Simulasi — ${mc.label} (${rute==='dom'?'Domestik':rute==='int'?'Internasional':'Total'})`;
   const cs=$('wi-chart-sub');
-  if(cs) cs.textContent=`Metode: ${methodLabel} · Dampak total: ${totalImpact>=0?'+':''}${totalImpact.toFixed(1)}%`;
+  if(cs) cs.textContent=`Metode: ${methodLabel} · Dampak total: ${totalImpact>=0?'+':''}${totalImpact.toFixed(1)}% · Chart tetap tahunan (5th)`;
 
   // Update metrik buttons
   ['pax','ac','cargo'].forEach(m=>{
@@ -9050,46 +9171,152 @@ function runWhatif(silent){
     }
   });
 
-  // Update tabel hasil
+  // Update rute/period toggle highlight
+  ['all','dom','int'].forEach(r=>{
+    const btn=$('wi-rute-'+r);
+    if(btn){ btn.style.background=rute===r?'var(--blue)':'transparent'; btn.style.color=rute===r?'#fff':'var(--t2)'; }
+  });
+  const period = W.selPeriod||'yearly';
+  ['yearly','monthly'].forEach(p=>{
+    const btn=$('wi-period-'+p);
+    if(btn){ btn.style.background=period===p?'var(--teal)':'transparent'; btn.style.color=period===p?'#fff':'var(--t2)'; }
+  });
+  const yw=$('wi-year-wrap'); if(yw) yw.style.display=(period==='monthly')?'':'none';
+  const ruteLabel = rute==='dom'?'Domestik':rute==='int'?'Internasional':'Total (Dom+Int)';
+
+  // Update tabel hasil (Tahunan atau Bulanan)
   const tblEl=$('wi-result-table');
   if(tblEl){
     const badge=$('wi-tbl-badge');
-    if(badge) badge.textContent=mc.label+' · '+methodLabel;
 
-    let rows='';
-    futYrs.forEach((y,i)=>{
-      const b=baseFc[i]||0;
-      const s=simFc[i]||0;
-      const delta=b>0?((s-b)/b*100):0;
-      const grB = i===0?(histVals.length>0?((b-histVals[histVals.length-1])/histVals[histVals.length-1]*100):0)
-                      :((b-(baseFc[i-1]||b))/( baseFc[i-1]||b)*100);
-      rows+=`<tr>
-        <td class="td-b" style="color:var(--blue2)">${y}</td>
-        <td class="td-r" style="color:var(--t1)">
-          ${fmtVal(b,mc.unit)}
-          <div style="font-size:9px;color:${grB>=0?'var(--green2)':'var(--red2)'}">${grB>=0?'+':''}${grB.toFixed(1)}% YoY</div>
-        </td>
-        <td class="td-r" style="color:${mc.color};font-weight:700">
-          ${fmtVal(s,mc.unit)}
-          <div style="font-size:9px;color:var(--t3)">ramp ${(rampUp[i]*100).toFixed(0)}%</div>
-        </td>
-        <td class="td-r">
-          <span style="font-weight:700;color:${delta>=0?'var(--green2)':'var(--red2)'}">
-            ${delta>=0?'+':''}${delta.toFixed(1)}%
-          </span>
-        </td>
-      </tr>`;
-    });
+    if(period==='monthly'){
+      const selYear = displayYrs.includes(W.selYear) ? W.selYear : displayYrs[0];
+      const MONTHS_SHORT=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Ags','Sep','Okt','Nov','Des'];
 
-    tblEl.innerHTML=`<div style="overflow-x:auto"><table>
-      <thead><tr style="background:var(--card2)">
-        <th>Tahun</th>
-        <th class="td-r" style="color:var(--t2)">Baseline</th>
-        <th class="td-r" style="color:${mc.color}">Simulasi</th>
-        <th class="td-r">Δ Delta</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>`;
+      if(hasPartialYear && selYear===partialYr && partialCalc){
+        // ── Tahun berjalan: Jan..partialM aktual, sisanya proyeksi+simulasi ──
+        if(badge) badge.textContent=mc.label+' · '+ruteLabel+' · '+selYear+' (Berjalan)';
+        let mrows='';
+        partialCalc.monthly.forEach(m=>{
+          const dM = m.isActual ? 0 : (m.bM>0?((m.sM-m.bM)/m.bM*100):0);
+          mrows+=`<tr style="${m.isActual?'':''}">
+            <td class="td-b" style="color:${m.isActual?'var(--green2)':'var(--blue2)'}">${m.mn}
+              <span style="font-size:8px;color:${m.isActual?'var(--green2)':'var(--amber2)'};font-weight:600">${m.isActual?' ✓ Aktual':' ⚡ Proyeksi'}</span>
+            </td>
+            <td class="td-r" style="color:var(--t1)">${fmtVal(m.bM,mc.unit)}</td>
+            <td class="td-r" style="color:${mc.color};font-weight:700">
+              ${fmtVal(m.sM,mc.unit)}
+              ${m.isActual?'<div style="font-size:8px;color:var(--t3)">= aktual</div>':`<div style="font-size:8px;color:var(--t3)">ramp ${(rampUp[0]*100).toFixed(0)}%</div>`}
+            </td>
+            <td class="td-r">
+              ${m.isActual?'<span style="color:var(--t3);font-size:10px">—</span>'
+                :`<span style="font-weight:700;color:${dM>=0?'var(--green2)':'var(--red2)'}">${dM>=0?'+':''}${dM.toFixed(1)}%</span>`}
+            </td>
+          </tr>`;
+        });
+        tblEl.innerHTML=`<div style="font-size:9px;color:var(--t3);margin-bottom:8px;line-height:1.5">
+            ⚡ ${selYear} — Jan s/d ${MONTHS_SHORT[partialM-1]}: <strong style="color:var(--green2)">Data Aktual</strong> (tidak disimulasikan — sudah terjadi)
+            &nbsp;|&nbsp; ${MONTHS_SHORT[partialM]} s/d Des: <strong style="color:var(--amber2)">Proyeksi musiman kena dampak what-if</strong> (ramp tahun-1, ${(rampUp[0]*100).toFixed(0)}%).
+          </div>
+          <div style="overflow-x:auto"><table>
+          <thead><tr style="background:var(--card2)">
+            <th>Bulan</th>
+            <th class="td-r" style="color:var(--t2)">Baseline</th>
+            <th class="td-r" style="color:${mc.color}">Simulasi</th>
+            <th class="td-r">Δ Delta</th>
+          </tr></thead>
+          <tbody>${mrows}</tbody>
+        </table></div>`;
+      } else {
+        const yi = futYrs.indexOf(selYear);
+        const annualBase = baseFc[yi]||0;
+        const annualSim  = simFc[yi]||0;
+        // Pola musiman — fungsi global yang SAMA dipakai Forecasting Center & Risk & Scenario
+        const prop = computeMonthlyHistoricalProp(metric, rute, yrs);
+        if(badge) badge.textContent=mc.label+' · '+ruteLabel+' · '+selYear;
+
+        let mrows='';
+        MONTHS_SHORT.forEach((mn,mi)=>{
+          const bM=annualBase*(prop[mi]||1/12), sM=annualSim*(prop[mi]||1/12);
+          const dM=bM>0?((sM-bM)/bM*100):0;
+          mrows+=`<tr>
+            <td class="td-b" style="color:var(--blue2)">${mn}</td>
+            <td class="td-r" style="color:var(--t1)">${fmtVal(bM,mc.unit)}</td>
+            <td class="td-r" style="color:${mc.color};font-weight:700">${fmtVal(sM,mc.unit)}</td>
+            <td class="td-r"><span style="font-weight:700;color:${dM>=0?'var(--green2)':'var(--red2)'}">${dM>=0?'+':''}${dM.toFixed(1)}%</span></td>
+          </tr>`;
+        });
+
+        tblEl.innerHTML=`<div style="font-size:9px;color:var(--t3);margin-bottom:8px;line-height:1.5">
+            📅 Distribusi bulanan ${selYear} — total tahunan ${selYear} dipecah pakai pola musiman historis (rute: ${ruteLabel}).
+            Tahun ${selYear} adalah tahun proyeksi penuh, jadi seluruh 12 bulan kena dampak what-if merata (ramp yang sama).
+          </div>
+          <div style="overflow-x:auto"><table>
+          <thead><tr style="background:var(--card2)">
+            <th>Bulan</th>
+            <th class="td-r" style="color:var(--t2)">Baseline</th>
+            <th class="td-r" style="color:${mc.color}">Simulasi</th>
+            <th class="td-r">Δ Delta</th>
+          </tr></thead>
+          <tbody>${mrows}</tbody>
+        </table></div>`;
+      }
+    } else {
+      if(badge) badge.textContent=mc.label+' · '+ruteLabel+' · '+methodLabel;
+
+      let rows='';
+      if(hasPartialYear && partialCalc){
+        const b=partialCalc.annualBaseline, s=partialCalc.annualSim;
+        const delta=b>0?((s-b)/b*100):0;
+        rows+=`<tr style="background:rgba(245,158,11,.05)">
+          <td class="td-b" style="color:var(--amber2)">${partialYr} <span style="font-size:8px">⚡ Berjalan</span></td>
+          <td class="td-r" style="color:var(--t1)">
+            ${fmtVal(b,mc.unit)}
+            <div style="font-size:9px;color:var(--t3)">${partialM}bl aktual + ${12-partialM}bl proyeksi</div>
+          </td>
+          <td class="td-r" style="color:${mc.color};font-weight:700">
+            ${fmtVal(s,mc.unit)}
+            <div style="font-size:9px;color:var(--t3)">sisa tahun kena ramp ${(rampUp[0]*100).toFixed(0)}%</div>
+          </td>
+          <td class="td-r">
+            <span style="font-weight:700;color:${delta>=0?'var(--green2)':'var(--red2)'}">${delta>=0?'+':''}${delta.toFixed(1)}%</span>
+          </td>
+        </tr>`;
+      }
+      futYrs.forEach((y,i)=>{
+        const b=baseFc[i]||0;
+        const s=simFc[i]||0;
+        const delta=b>0?((s-b)/b*100):0;
+        const grB = i===0?(histVals.length>0?((b-histVals[histVals.length-1])/histVals[histVals.length-1]*100):0)
+                        :((b-(baseFc[i-1]||b))/( baseFc[i-1]||b)*100);
+        rows+=`<tr>
+          <td class="td-b" style="color:var(--blue2)">${y}</td>
+          <td class="td-r" style="color:var(--t1)">
+            ${fmtVal(b,mc.unit)}
+            <div style="font-size:9px;color:${grB>=0?'var(--green2)':'var(--red2)'}">${grB>=0?'+':''}${grB.toFixed(1)}% YoY</div>
+          </td>
+          <td class="td-r" style="color:${mc.color};font-weight:700">
+            ${fmtVal(s,mc.unit)}
+            <div style="font-size:9px;color:var(--t3)">ramp ${(rampUp[i]*100).toFixed(0)}%</div>
+          </td>
+          <td class="td-r">
+            <span style="font-weight:700;color:${delta>=0?'var(--green2)':'var(--red2)'}">
+              ${delta>=0?'+':''}${delta.toFixed(1)}%
+            </span>
+          </td>
+        </tr>`;
+      });
+
+      tblEl.innerHTML=`<div style="overflow-x:auto"><table>
+        <thead><tr style="background:var(--card2)">
+          <th>Tahun</th>
+          <th class="td-r" style="color:var(--t2)">Baseline</th>
+          <th class="td-r" style="color:${mc.color}">Simulasi</th>
+          <th class="td-r">Δ Delta</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>`;
+    }
   }
 
   // Update KPI cards
