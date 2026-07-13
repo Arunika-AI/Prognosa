@@ -2048,10 +2048,16 @@ function forecast(){
     </select>
     <span class="ctrl-lbl">Rute:</span>
     <select class="sel-box" id="fc-rute" onchange="STATE.selRute=this.value;buildFcEverything()"
-      style="font-weight:600;color:${STATE.selRute==='dom'?'var(--blue2)':STATE.selRute==='int'?'var(--amber2)':'var(--t2)'}">
+      style="font-weight:600;color:${STATE.selRute==='dom'||STATE.selRute==='dep'?'var(--blue2)':STATE.selRute==='int'||STATE.selRute==='arr'?'var(--amber2)':'var(--t2)'}">
+      ${STATE.selMetric==='otp' ? `
+      <option value="all" ${(STATE.selRute||'all')==='all'?'selected':''}>🌐 Total (Dep+Arr)</option>
+      <option value="dep" ${STATE.selRute==='dep'?'selected':''}>🛫 Departure</option>
+      <option value="arr" ${STATE.selRute==='arr'?'selected':''}>🛬 Arrival</option>
+      ` : `
       <option value="all" ${(STATE.selRute||'all')==='all'?'selected':''}>🌐 Total (Dom+Int)</option>
       <option value="dom" ${STATE.selRute==='dom'?'selected':''}>✈ Domestik</option>
       <option value="int" ${STATE.selRute==='int'?'selected':''}>🌏 Internasional</option>
+      `}
     </select>
     <span class="ctrl-lbl">Horizon:</span>
     <select class="sel-box" id="fc-horizon" onchange="buildFcEverything()">
@@ -2204,6 +2210,32 @@ function resetIndustryParams(){
 
 function buildFcEverything(){
   if(document.getElementById('fc-method-sel')) buildMethodCard();
+
+  // ── Sinkron dropdown Rute dengan metrik aktif ─────────────────
+  // OTP direkam per Departure/Arrival, metrik lain per Dom/Int — dua sumbu
+  // yang berbeda. Reset selRute kalau nilai lama tidak valid untuk metrik
+  // baru, lalu render ulang opsi dropdown-nya (select ini tidak di-render
+  // ulang oleh forecast(), jadi harus di-refresh manual di sini).
+  (function syncRuteDropdown(){
+    const isOtp = STATE.selMetric==='otp';
+    const validVals = isOtp ? ['all','dep','arr'] : ['all','dom','int'];
+    if(!validVals.includes(STATE.selRute||'all')) STATE.selRute='all';
+    const ruteEl = document.getElementById('fc-rute');
+    if(ruteEl){
+      ruteEl.innerHTML = isOtp ? `
+        <option value="all" ${(STATE.selRute||'all')==='all'?'selected':''}>🌐 Total (Dep+Arr)</option>
+        <option value="dep" ${STATE.selRute==='dep'?'selected':''}>🛫 Departure</option>
+        <option value="arr" ${STATE.selRute==='arr'?'selected':''}>🛬 Arrival</option>
+      ` : `
+        <option value="all" ${(STATE.selRute||'all')==='all'?'selected':''}>🌐 Total (Dom+Int)</option>
+        <option value="dom" ${STATE.selRute==='dom'?'selected':''}>✈ Domestik</option>
+        <option value="int" ${STATE.selRute==='int'?'selected':''}>🌏 Internasional</option>
+      `;
+      ruteEl.style.color = (STATE.selRute==='dom'||STATE.selRute==='dep') ? 'var(--blue2)'
+        : (STATE.selRute==='int'||STATE.selRute==='arr') ? 'var(--amber2)' : 'var(--t2)';
+    }
+  })();
+
   // Gunakan DB.years jika ada data upload (skala konsisten)
   // Gunakan getYears() hanya jika mode demo
   // Tahun awal dan akhir keduanya bisa dipilih bebas oleh user untuk mempersempit
@@ -2349,9 +2381,13 @@ function buildFcEverything(){
                 }))
             :(HIST.ac[partialYr]||[]))
           : STATE.selMetric==='otp'
-          ? (HIST.otp[partialYr]||[]).map(v=>v*100)
+          ? (rute==='dep'?(HIST.otpDep[partialYr]||HIST.otp[partialYr]||[])
+            :rute==='arr'?(HIST.otpArr[partialYr]||HIST.otp[partialYr]||[])
+            :(HIST.otp[partialYr]||[])).map(v=>v*100)
           : STATE.selMetric==='lf'
-          ? (HIST.lf[partialYr]||[]).map(v=>v*100)
+          ? (rute==='dom'?(HIST.lfDom[partialYr]||HIST.lf[partialYr]||[])
+            :rute==='int'?(HIST.lfInt[partialYr]||[])
+            :(HIST.lf[partialYr]||[])).map(v=>v*100)
           : (rute==='dom'?(HIST.cargoDom[partialYr]||HIST.cargo[partialYr]||[])
             :rute==='int'?(HIST.cargoInt[partialYr]||[])
             :(HIST.cargo[partialYr]||[]))
@@ -2650,8 +2686,11 @@ function buildFcEverything(){
           }
         } else if(STATE.selMetric==='otp'||STATE.selMetric==='lf'){
           // OTP/LF tahunan: rata-rata dari bulan aktual yang tersedia (dalam %)
-          const hSrc = STATE.selMetric==='otp' ? HIST.otp : HIST.lf;
-          const actArrAnn = (hSrc[partialYrAnn]||[]).filter(v=>v>0).map(v=>v*100);
+          const rute2 = STATE.selRute||'all';
+          const hSrc = STATE.selMetric==='otp'
+            ? (rute2==='dep'?(HIST.otpDep[partialYrAnn]||HIST.otp[partialYrAnn]):rute2==='arr'?(HIST.otpArr[partialYrAnn]||HIST.otp[partialYrAnn]):HIST.otp[partialYrAnn])
+            : (rute2==='dom'?(HIST.lfDom[partialYrAnn]||HIST.lf[partialYrAnn]):rute2==='int'?HIST.lfInt[partialYrAnn]:HIST.lf[partialYrAnn]);
+          const actArrAnn = (hSrc||[]).filter(v=>v>0).map(v=>v*100);
           fullEstSeasonal = actArrAnn.length>0
             ? +(actArrAnn.reduce((a,b)=>a+b,0)/actArrAnn.length).toFixed(2)
             : (STATE.selMetric==='lf'?80:85);
@@ -2898,9 +2937,11 @@ function buildFcEverything(){
         const hc=rute==='dom'?(HIST.cargoDom[y]||HIST.cargo[y]||[]):rute==='int'?(HIST.cargoInt[y]||[]):(HIST.cargo[y]||[]);
         if(hc.length===12&&hc.some(v=>v>0)) arr=hc;
       } else if(STATE.selMetric==='otp'){
-        arr=(HIST.otp[y]||[]).map(v=>v*100); if(!arr.some(v=>v>0)) arr=[];
+        const ho=rute==='dep'?(HIST.otpDep[y]||HIST.otp[y]||[]):rute==='arr'?(HIST.otpArr[y]||HIST.otp[y]||[]):(HIST.otp[y]||[]);
+        arr=ho.map(v=>v*100); if(!arr.some(v=>v>0)) arr=[];
       } else if(STATE.selMetric==='lf'){
-        arr=(HIST.lf[y]||[]).map(v=>v*100); if(!arr.some(v=>v>0)) arr=[];
+        const hl=rute==='dom'?(HIST.lfDom[y]||HIST.lf[y]||[]):rute==='int'?(HIST.lfInt[y]||[]):(HIST.lf[y]||[]);
+        arr=hl.map(v=>v*100); if(!arr.some(v=>v>0)) arr=[];
       }
       const s=arr.reduce((a,b)=>a+b,0);
       if(s>0){ arr.forEach((v,i)=>{avgArr[i]+=v/s;}); cnt++; }
@@ -3007,8 +3048,34 @@ function getMetricData(yrsOverride){
         return +(DB.cargo[y].total).toFixed(2);
       }).filter(v=>v>0);
     }
-    if(m==='otp') return yrs.filter(y=>DB.otp[y]>0).map(y=>+(DB.otp[y]*100).toFixed(2));
-    if(m==='lf')  return yrs.filter(y=>DB.lf[y]>0).map(y=>+(DB.lf[y]*100).toFixed(2));
+    if(m==='otp'){
+      // OTP direkam per Departure/Arrival (bukan Dom/Int) — 'dom'/'int' di sini
+      // ditolak, cuma 'dep'/'arr'/'all' yang berlaku untuk OTP.
+      // PENTING: DB.otpDep/DB.otpArr adalah array BULANAN (beda dari DB.otp yang skalar),
+      // jadi harus dirata-ratakan dulu dari bulan yang terisi.
+      const avgArr = arr => {
+        const a = (arr||[]).filter(v=>v>0);
+        return a.length ? a.reduce((s,v)=>s+v,0)/a.length : null;
+      };
+      return yrs.filter(y=>DB.otp[y]>0).map(y=>{
+        if(rute==='dep'){ const a=avgArr(DB.otpDep[y]); if(a!==null) return +(a*100).toFixed(2); }
+        if(rute==='arr'){ const a=avgArr(DB.otpArr[y]); if(a!==null) return +(a*100).toFixed(2); }
+        return +(DB.otp[y]*100).toFixed(2);
+      });
+    }
+    if(m==='lf'){
+      // LF sudah punya breakdown Dom/Int asli (lfDom/lfInt, array bulanan) — dulu
+      // diabaikan, sekarang dipakai konsisten dengan pax/ac/cargo.
+      const avgArr = arr => {
+        const a = (arr||[]).filter(v=>v>0);
+        return a.length ? a.reduce((s,v)=>s+v,0)/a.length : null;
+      };
+      return yrs.filter(y=>DB.lf[y]>0).map(y=>{
+        if(rute==='dom'){ const a=avgArr(DB.lfDom[y]); if(a!==null) return +(a*100).toFixed(2); }
+        if(rute==='int'){ const a=avgArr(DB.lfInt[y]); if(a!==null) return +(a*100).toFixed(2); }
+        return +(DB.lf[y]*100).toFixed(2);
+      });
+    }
   }
   // Fallback: data demo HIST
   const yrs=getYears();
