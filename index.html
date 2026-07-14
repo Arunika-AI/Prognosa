@@ -7578,10 +7578,46 @@ function computePartialYearBaseline(metric, rute, method){
     }
   } else if(metric==='ac'){
     const annTotal = (HIST.acAnnual[partialYrAnn]||0)/1e3;
-    fullEstSeasonal = +annTotal.toFixed(6);
+    if(rute==='dom'){
+      let p = 0.75;
+      if(HIST.acAnnualDom[partialYrAnn] && HIST.acAnnual[partialYrAnn]>0){
+        p = HIST.acAnnualDom[partialYrAnn]/HIST.acAnnual[partialYrAnn];
+      } else if(DB.ac && DB.ac[partialYrAnn] && DB.ac[partialYrAnn].total > 0){
+        p = (DB.ac[partialYrAnn].dom||0) / DB.ac[partialYrAnn].total;
+      }
+      fullEstSeasonal = +(annTotal*p).toFixed(6);
+    } else if(rute==='int'){
+      let p = 0.25;
+      if(HIST.acAnnualInt[partialYrAnn] && HIST.acAnnual[partialYrAnn]>0){
+        p = HIST.acAnnualInt[partialYrAnn]/HIST.acAnnual[partialYrAnn];
+      } else if(DB.ac && DB.ac[partialYrAnn] && DB.ac[partialYrAnn].total > 0){
+        p = (DB.ac[partialYrAnn].intl||0) / DB.ac[partialYrAnn].total;
+      }
+      fullEstSeasonal = +(annTotal*p).toFixed(6);
+    } else {
+      fullEstSeasonal = +annTotal.toFixed(6);
+    }
   } else if(metric==='cargo'){
     const annTotal = HIST.cargoAnnual[partialYrAnn]||0;
-    fullEstSeasonal = +annTotal.toFixed(6);
+    if(rute==='dom'){
+      let p = 0.75;
+      if(HIST.cargoAnnualDom[partialYrAnn] && HIST.cargoAnnual[partialYrAnn]>0){
+        p = HIST.cargoAnnualDom[partialYrAnn]/HIST.cargoAnnual[partialYrAnn];
+      } else if(DB.cargo && DB.cargo[partialYrAnn] && DB.cargo[partialYrAnn].total > 0){
+        p = (DB.cargo[partialYrAnn].dom||0) / DB.cargo[partialYrAnn].total;
+      }
+      fullEstSeasonal = +(annTotal*p).toFixed(6);
+    } else if(rute==='int'){
+      let p = 0.25;
+      if(HIST.cargoAnnualInt[partialYrAnn] && HIST.cargoAnnual[partialYrAnn]>0){
+        p = HIST.cargoAnnualInt[partialYrAnn]/HIST.cargoAnnual[partialYrAnn];
+      } else if(DB.cargo && DB.cargo[partialYrAnn] && DB.cargo[partialYrAnn].total > 0){
+        p = (DB.cargo[partialYrAnn].intl||0) / DB.cargo[partialYrAnn].total;
+      }
+      fullEstSeasonal = +(annTotal*p).toFixed(6);
+    } else {
+      fullEstSeasonal = +annTotal.toFixed(6);
+    }
   } else if(metric==='otp'||metric==='lf'){
     const hSrc = metric==='otp' ? HIST.otp : HIST.lf;
     const actArrAnn = (hSrc[partialYrAnn]||[]).filter(v=>v>0).map(v=>v*100);
@@ -9176,15 +9212,18 @@ function runWhatif(silent){
   function runFc(mth, data){
     if(!data||data.length<2) return Array(HORIZON).fill(+(data[data.length-1]*1.03).toFixed(6));
     try{
-      switch(mth){
-        case 'holt-winters': return forecastHoltWinters(data,HORIZON);
-        case 'linear':       return forecastLinear(data,HORIZON);
-        case 'wma':          return forecastWMA(data,HORIZON);
-        case 'exp':          return forecastExp(data,HORIZON);
-        case 'holt-double':  return forecastHoltDouble(data,HORIZON);
-        case 'cagr':         return forecastCAGR(data,HORIZON);
-        default:             return forecastHoltWinters(data,HORIZON);
-      }
+      // PENTING: pakai getForecast() (BUKAN forecastHoltWinters dkk langsung),
+      // lalu blendWithIndustry() + applyGrowthConstraint() kalau di-set —
+      // pipeline IDENTIK dengan fcBase di Forecasting Center. Sebelumnya baris
+      // ini manggil fungsi metode mentah, sama sekali tanpa blend ke asumsi
+      // industri, sehingga trennya bisa berlawanan arah dari FC.
+      const fcRaw   = getForecast(mth, data, HORIZON);
+      const lastVal = data[data.length-1];
+      const fcBlend = blendWithIndustry(fcRaw, lastVal);
+      const fcFinal = INDUSTRY_PARAMS.minGrowthRate > 0
+        ? applyGrowthConstraint(fcBlend, lastVal)
+        : fcBlend;
+      return fcFinal.map(v=>+v.toFixed(6));
     }catch(e){ return Array(HORIZON).fill(+(histVals[histVals.length-1]*1.03).toFixed(6)); }
   }
 
