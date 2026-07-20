@@ -1747,6 +1747,22 @@ const INDUSTRY_PARAMS = {
   blendWeight:   0.3,    // 30% blend ke industri (70% metode statistik)
 };
 
+// ── Tipe pesawat untuk What-if Simulator (parameter "Maskapai Baru") ──────
+// Kapasitas kursi: angka tipikal konfigurasi 1-kelas/umum industri, BUKAN dari
+// data riil maskapai tertentu — dipakai sebagai asumsi kasar, bisa dikoreksi.
+// Kapasitas kargo (cargo hold/belly, dalam Ton per penerbangan): jauh LEBIH
+// tidak presisi dibanding kapasitas kursi (tergantung konfigurasi & rute),
+// dipakai sebagai estimasi kasar saja.
+const AIRCRAFT_TYPES = {
+  atr72:  { label:'ATR 72',            seats:70,  cargoTon:0.5 },
+  a320:   { label:'Airbus A320',       seats:180, cargoTon:2.0 },
+  b737:   { label:'Boeing 737',        seats:180, cargoTon:2.0 },
+  a330:   { label:'Airbus A330',       seats:300, cargoTon:8.0 },
+  b777:   { label:'Boeing 777',        seats:350, cargoTon:12.0 },
+  b747:   { label:'Boeing 747',        seats:450, cargoTon:20.0 },
+  a380:   { label:'Airbus A380',       seats:550, cargoTon:15.0 },
+};
+
 // ── Opsi C: Terapkan constraint pertumbuhan minimum ──────────────
 // Memastikan setiap tahun >= tahun sebelumnya × (1 + minGrowth)
 // Jika hasil metode lebih tinggi → pakai hasil metode (tidak memaksimalkan)
@@ -2392,69 +2408,15 @@ function buildFcEverything(){
             :rute==='int'?(HIST.cargoInt[partialYr]||[])
             :(HIST.cargo[partialYr]||[]))
 
-        // fullEst sesuai rute
-        let fullEstSeasonal = 0;
-        if(STATE.selMetric==='pax'){
-          const annTotal = HIST.paxAnnual[partialYr]||0;
-          if(rute==='dom'){
-            // Proporsi Dom dari data aktual
-            const domProp = annTotal > 0 && HIST.paxAnnualDom[partialYr]
-              ? HIST.paxAnnualDom[partialYr]/annTotal : 0.75;
-            fullEstSeasonal = +(annTotal * domProp).toFixed(6);
-          } else if(rute==='int'){
-            // Prioritas: HIST.paxAnnualInt → proporsi DB.pax → default 25%
-            let intProp = 0.25;
-            if(HIST.paxAnnualInt[partialYr] && annTotal > 0){
-              intProp = HIST.paxAnnualInt[partialYr]/annTotal;
-            } else if(DB.pax && DB.pax[partialYr] && DB.pax[partialYr].total > 0){
-              intProp = (DB.pax[partialYr].intl||0) / DB.pax[partialYr].total;
-            }
-            fullEstSeasonal = +(annTotal * intProp).toFixed(6);
-          } else {
-            fullEstSeasonal = +annTotal.toFixed(6);
-          }
-          if(!fullEstSeasonal) fullEstSeasonal = +histData.reduce((a,b)=>a+b,0).toFixed(6);
-        } else if(STATE.selMetric==='ac'){
-          const annTotal = HIST.acAnnual[partialYr]||0;
-          if(rute==='dom'){
-            const p = annTotal>0&&HIST.acAnnualDom[partialYr]?HIST.acAnnualDom[partialYr]/annTotal:0.75;
-            fullEstSeasonal = +((annTotal*p)/1e3).toFixed(6);
-          } else if(rute==='int'){
-            const p = annTotal>0&&HIST.acAnnualInt[partialYr]?HIST.acAnnualInt[partialYr]/annTotal:0.25;
-            fullEstSeasonal = +((annTotal*p)/1e3).toFixed(6);
-          } else {
-            fullEstSeasonal = +(annTotal/1e3).toFixed(6);
-          }
-        } else if(STATE.selMetric==='otp'||STATE.selMetric==='lf'){
-          // LF/OTP: rata-rata dari data aktual yang tersedia (dalam %)
-          const actArr = histData.filter(v=>v>0);
-          fullEstSeasonal = actArr.length>0
-            ? +(actArr.reduce((a,b)=>a+b,0)/actArr.length).toFixed(2)
-            : (STATE.selMetric==='lf'?80:85);
-        } else {
-          const annTotal = HIST.cargoAnnual[partialYr]||0;
-          if(rute==='dom'){
-            const p = annTotal>0&&HIST.cargoAnnualDom[partialYr]?HIST.cargoAnnualDom[partialYr]/annTotal:0.75;
-            fullEstSeasonal = +(annTotal*p).toFixed(6);
-          } else if(rute==='int'){
-            const p = annTotal>0&&HIST.cargoAnnualInt[partialYr]?HIST.cargoAnnualInt[partialYr]/annTotal:0.25;
-            fullEstSeasonal = +(annTotal*p).toFixed(6);
-          } else {
-            fullEstSeasonal = +annTotal.toFixed(6);
-          }
-        }
-
-        // fullEst dari metode forecast yang dipilih (fcBase[0] = tahun pertama forecast)
-        // Kita pakai nilai ini sebagai proyeksi full year 2026 versi metode
-        // Blend: 50% musiman + 50% metode (bisa disesuaikan)
-        // Jika rute INT dan fcMethodEst dari data historis INT tapi fullEstSeasonal = 0,
-        // gunakan fullEstSeasonal sebagai anchor (lebih reliable dari fcBase)
-        let fcMethodEst = fcBase[0] || fullEstSeasonal;
-        if(fullEstSeasonal > 0 && fcMethodEst > fullEstSeasonal * 10){
-          fcMethodEst = fullEstSeasonal;
-        }
-        const blendRatio  = 0.5;
-        const fullEst     = +(fullEstSeasonal * (1 - blendRatio) + fcMethodEst * blendRatio).toFixed(6);
+        // fullEst — pakai fungsi BERSAMA computePartialYearBaseline() (fungsi yang
+        // SAMA dipakai Risk & Scenario dan What-if Simulator), bukan hitung ulang
+        // inline seperti sebelumnya. Sebelumnya FC punya implementasi paralelnya
+        // sendiri yang di-desain supaya EKUIVALEN secara rumus, tapi karena tetap
+        // dua baris kode terpisah, pembulatan .toFixed(6) di tahap antara bisa
+        // geser beberapa digit terakhir (selisih beberapa orang dari jutaan).
+        // Manggil fungsi yang sama persis menghilangkan celah itu sepenuhnya.
+        const pbFC = computePartialYearBaseline(STATE.selMetric, rute, STATE.selMethod);
+        const fullEst = (pbFC && isFinite(pbFC.fullEst)) ? pbFC.fullEst : (fcBase[0]||0);
 
         // Simpan ke global agar Risk & Scenario bisa pakai nilai IDENTIK dari FC monthly
         window._FC_RESULT_PARTIAL = {
@@ -2646,90 +2608,13 @@ function buildFcEverything(){
       const partialMAnn   = partialYrAnn ? HIST.partial[partialYrAnn] : 0;
       if(partialYrAnn && partialMAnn > 0){
         const mnm = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Ags','Sep','Okt','Nov','Des'];
-        let fullEstSeasonal = 0;
         const rute = STATE.selRute||'all';
-        if(STATE.selMetric==='pax'){
-          const annTotal = HIST.paxAnnual[partialYrAnn]||0;
-          if(rute==='dom'){
-            const p = annTotal>0&&HIST.paxAnnualDom[partialYrAnn]?HIST.paxAnnualDom[partialYrAnn]/annTotal:0.75;
-            fullEstSeasonal = +(annTotal*p).toFixed(6);
-          } else if(rute==='int'){
-            const p = annTotal>0&&HIST.paxAnnualInt[partialYrAnn]?HIST.paxAnnualInt[partialYrAnn]/annTotal:0.25;
-            fullEstSeasonal = +(annTotal*p).toFixed(6);
-          } else {
-            fullEstSeasonal = +annTotal.toFixed(6);
-          }
-        } else if(STATE.selMetric==='ac'){
-          const annTotal = HIST.acAnnual[partialYrAnn]||0;
-          if(rute==='dom'){
-            // Gunakan acAnnualDom jika ada, fallback ke proporsi dari DB aktual
-            if(HIST.acAnnualDom[partialYrAnn]){
-              fullEstSeasonal = +(HIST.acAnnualDom[partialYrAnn]/1e3).toFixed(6);
-            } else {
-              const domActual = (DB.ac&&DB.ac[partialYrAnn]&&DB.ac[partialYrAnn].dom)||0;
-              const totActual = (DB.ac&&DB.ac[partialYrAnn]&&DB.ac[partialYrAnn].total)||1;
-              const p = totActual>0 ? domActual/totActual : 0.75;
-              fullEstSeasonal = +((annTotal*p)/1e3).toFixed(6);
-            }
-          } else if(rute==='int'){
-            // Gunakan acAnnualInt jika ada, fallback ke proporsi dari DB aktual
-            if(HIST.acAnnualInt[partialYrAnn]){
-              fullEstSeasonal = +(HIST.acAnnualInt[partialYrAnn]/1e3).toFixed(6);
-            } else {
-              const intActual = (DB.ac&&DB.ac[partialYrAnn]&&DB.ac[partialYrAnn].intl)||0;
-              const totActual = (DB.ac&&DB.ac[partialYrAnn]&&DB.ac[partialYrAnn].total)||1;
-              const p = totActual>0 ? intActual/totActual : 0.25;
-              fullEstSeasonal = +((annTotal*p)/1e3).toFixed(6);
-            }
-          } else {
-            fullEstSeasonal = +(annTotal/1e3).toFixed(6);
-          }
-        } else if(STATE.selMetric==='otp'||STATE.selMetric==='lf'){
-          // OTP/LF tahunan: rata-rata dari bulan aktual yang tersedia (dalam %)
-          const rute2 = STATE.selRute||'all';
-          const hSrc = STATE.selMetric==='otp'
-            ? (rute2==='dep'?(HIST.otpDep[partialYrAnn]||HIST.otp[partialYrAnn]):rute2==='arr'?(HIST.otpArr[partialYrAnn]||HIST.otp[partialYrAnn]):HIST.otp[partialYrAnn])
-            : (rute2==='dom'?(HIST.lfDom[partialYrAnn]||HIST.lf[partialYrAnn]):rute2==='int'?HIST.lfInt[partialYrAnn]:HIST.lf[partialYrAnn]);
-          const actArrAnn = (hSrc||[]).filter(v=>v>0).map(v=>v*100);
-          fullEstSeasonal = actArrAnn.length>0
-            ? +(actArrAnn.reduce((a,b)=>a+b,0)/actArrAnn.length).toFixed(2)
-            : (STATE.selMetric==='lf'?80:85);
-        } else {
-          // cargo
-          const annTotal = HIST.cargoAnnual[partialYrAnn]||0;
-          if(rute==='dom'){
-            if(HIST.cargoAnnualDom[partialYrAnn]){
-              fullEstSeasonal = +(HIST.cargoAnnualDom[partialYrAnn]).toFixed(6);
-            } else {
-              const domActual = (DB.cargo&&DB.cargo[partialYrAnn]&&DB.cargo[partialYrAnn].dom)||0;
-              const totActual = (DB.cargo&&DB.cargo[partialYrAnn]&&DB.cargo[partialYrAnn].total)||1;
-              const p = totActual>0 ? domActual/totActual : 0.75;
-              fullEstSeasonal = +(annTotal*p).toFixed(6);
-            }
-          } else if(rute==='int'){
-            if(HIST.cargoAnnualInt[partialYrAnn]){
-              fullEstSeasonal = +(HIST.cargoAnnualInt[partialYrAnn]).toFixed(6);
-            } else {
-              const intActual = (DB.cargo&&DB.cargo[partialYrAnn]&&DB.cargo[partialYrAnn].intl)||0;
-              const totActual = (DB.cargo&&DB.cargo[partialYrAnn]&&DB.cargo[partialYrAnn].total)||1;
-              const p = totActual>0 ? intActual/totActual : 0.25;
-              fullEstSeasonal = +(annTotal*p).toFixed(6);
-            }
-          } else {
-            fullEstSeasonal = +(annTotal).toFixed(6);
-          }
-        }
-
-        // Blend seasonal estimate dengan metode forecast (50/50) agar berubah saat ganti metode
-        let fcMethodEstAnn = fcBase[0] || fullEstSeasonal;
-        // Guard anomali (diperketat): jika fcMethodEst menyimpang >3x dari fullEstSeasonal, gunakan fullEstSeasonal saja
-        if(fullEstSeasonal > 0 && (fcMethodEstAnn > fullEstSeasonal * 3 || fcMethodEstAnn < fullEstSeasonal / 3)){
-          fcMethodEstAnn = fullEstSeasonal;
-        }
-        const fcMethodEst = fcMethodEstAnn;
-        let fullEst = +(fullEstSeasonal * 0.5 + fcMethodEst * 0.5).toFixed(6);
-
-        // Guard lapis kedua dihapus -- konsisten dengan FC monthly dan computePartialYearBaseline
+        // fullEst — pakai fungsi BERSAMA computePartialYearBaseline(), sama seperti
+        // blok monthly di atas dan Risk & Scenario / What-if Simulator. Sebelumnya
+        // blok ini punya guard anomali beda ambang (×3) dari blok lain (×10) — sumber
+        // inkonsistensi tersembunyi lain yang sekaligus hilang dengan penyatuan ini.
+        const pbFCAnn = computePartialYearBaseline(STATE.selMetric, rute, STATE.selMethod);
+        let fullEst = (pbFCAnn && isFinite(pbFCAnn.fullEst)) ? pbFCAnn.fullEst : (fcBase[0]||0);
 
         // PENTING: samakan prevVal (basis growth tahun 2027+) dengan fullEst yang ditampilkan
         // di baris 2026 ini, agar growth % konsisten dan tidak ada dua sumber angka berbeda.
@@ -7754,7 +7639,12 @@ function risk(){
   // ── Sync rute dengan Forecasting Center jika tersedia ──────────
   const fcResInit = window._FC_RESULT;
   if(fcResInit && fcResInit.selMetric===STATE.riskMetric){
-    STATE.riskRute = fcResInit.selRute||'all';
+    // Sync rute dari FC HANYA jika user belum pernah memilih sendiri di Risk
+    // (sebelumnya baris ini SELALU menimpa pilihan manual user di dropdown Rute,
+    // membuat dropdown itu kelihatan tidak berfungsi begitu risk() re-render)
+    if(!STATE.riskRuteUserSet){
+      STATE.riskRute = fcResInit.selRute||'all';
+    }
     // Sync method dari FC HANYA jika user belum pernah memilih sendiri di Risk
     if(!STATE.riskMethodUserSet){
       STATE.riskMethod = fcResInit.method||STATE.riskMethod||'holt-winters';
@@ -7949,6 +7839,17 @@ function risk(){
           <option value="pax"   ${selMetric==='pax'  ?'selected':''}>👤 Penumpang</option>
           <option value="ac"    ${selMetric==='ac'   ?'selected':''}>✈ Pesawat</option>
           <option value="cargo" ${selMetric==='cargo'?'selected':''}>📦 Kargo</option>
+        </select>
+
+        <!-- Dropdown Rute -->
+        <select id="risk-dd-rute"
+          onchange="STATE.riskRute=this.value;STATE.riskRuteUserSet=true;killCharts();risk()"
+          style="padding:5px 10px;border-radius:7px;border:1px solid var(--bdr);
+                 background:var(--card2);font-size:11px;font-weight:600;
+                 color:${riskRute==='dom'?'var(--blue2)':riskRute==='int'?'var(--amber2)':'var(--t1)'}">
+          <option value="all" ${riskRute==='all'?'selected':''}>🌐 Total (Dom+Int)</option>
+          <option value="dom" ${riskRute==='dom'?'selected':''}>✈ Domestik</option>
+          <option value="int" ${riskRute==='int'?'selected':''}>🌏 Internasional</option>
         </select>
 
         <!-- Dropdown Metode Proyeksi -->
@@ -8900,6 +8801,8 @@ function whatif(){
   if(W.rute===undefined)    W.rute=0;       // rute baru (jumlah)
   if(W.kapasitas===undefined) W.kapasitas=0; // tambah kapasitas terminal (%)
   if(W.maskapai===undefined)  W.maskapai=0;  // maskapai baru (jumlah)
+  if(W.maskapaiTipe===undefined) W.maskapaiTipe='b737'; // tipe pesawat maskapai baru
+  if(W.maskapaiFreq===undefined) W.maskapaiFreq=7;       // frekuensi per minggu per maskapai (7=1x/hari)
   if(W.frekuensi===undefined) W.frekuensi=0; // tambah frekuensi per rute (%)
   if(W.selMetric===undefined) W.selMetric='pax';
   if(W.selRute===undefined)   W.selRute='all';    // 'all'|'dom'|'int' — filter rute tampilan
@@ -8991,7 +8894,36 @@ function whatif(){
       </div>
       ${mkSlider('rute','Penambahan Rute Baru',0,20,1,W.rute,' rute','Setiap rute baru estimasi +0.8% pax tahunan')}
       ${mkSlider('kapasitas','Ekspansi Kapasitas Terminal (%)',0,50,1,W.kapasitas,'%','Ekspansi kapasitas mendukung pertumbuhan pax jangka panjang')}
-      ${mkSlider('maskapai','Maskapai Baru',0,5,1,W.maskapai,' maskapai','Setiap maskapai baru estimasi +1.5% pax & +2% AC')}
+      <div style="margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+          <span style="font-size:11px;color:var(--t2);font-weight:500">Maskapai Baru</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 70px;gap:6px;margin-bottom:6px">
+          <select id="wi-maskapai-tipe" onchange="STATE.WI.maskapaiTipe=this.value;runWhatif()"
+            style="padding:5px 8px;border-radius:6px;border:1px solid var(--bdr);
+                   background:var(--card2);color:var(--t1);font-size:11px">
+            ${Object.entries(AIRCRAFT_TYPES).map(([k,a])=>
+              `<option value="${k}" ${W.maskapaiTipe===k?'selected':''}>${a.label} (${a.seats} kursi)</option>`
+            ).join('')}
+          </select>
+          <input type="number" id="ni-maskapai" value="${W.maskapai}" min="0" max="5" step="1"
+            onchange="STATE.WI.maskapai=parseInt(this.value)||0;runWhatif()"
+            style="width:100%;background:var(--card2);border:1px solid var(--bdr);border-radius:6px;
+                   color:var(--t1);font-size:11px;font-weight:700;padding:5px 6px;text-align:center"
+            title="Jumlah maskapai baru">
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+          <span style="font-size:10px;color:var(--t3)">Pergerakan/minggu per maskapai</span>
+          <span style="font-size:11px;font-weight:700;color:var(--blue2)" id="pv-maskapaiFreq">${W.maskapaiFreq}x</span>
+        </div>
+        <input type="range" id="sr-maskapaiFreq" min="1" max="21" step="1" value="${W.maskapaiFreq}"
+          oninput="STATE.WI.maskapaiFreq=parseInt(this.value);$('pv-maskapaiFreq').textContent=this.value+'x'"
+          onchange="runWhatif()">
+        <div style="font-size:9px;color:var(--t3);margin-top:2px">
+          1 pergerakan = 1 penerbangan datang/pergi. Dampak dihitung dari kapasitas kursi ×
+          Load Factor historis KNO — bukan asumsi % tetap.
+        </div>
+      </div>
       ${mkSlider('frekuensi','Penambahan Frekuensi per Rute (%)',0,50,1,W.frekuensi,'%','Frekuensi lebih tinggi → lebih banyak pergerakan AC & pax')}
 
       <!-- Divider -->
@@ -9246,6 +9178,30 @@ function runWhatif(silent){
     return pct;
   })();
 
+  // Maskapai baru: dihitung dari kapasitas riil (kursi/kargo tipe pesawat ×
+  // frekuensi × Load Factor historis KNO), BUKAN persentase asumsi tetap.
+  // Dihitung SEKALI di sini (bukan di dalam opImpact) supaya nilainya bisa
+  // dipakai ulang persis sama oleh breakdown "Kontribusi per Faktor" & AI Analisis
+  // di bawah — satu sumber angka, bukan dua rumus terpisah yang bisa beda.
+  const maskapaiPct = (()=>{
+    if(!(W.maskapai > 0)) return 0;
+    const acType = AIRCRAFT_TYPES[W.maskapaiTipe] || AIRCRAFT_TYPES.b737;
+    const freq   = W.maskapaiFreq || 7; // pergerakan/minggu, per maskapai
+    // Load Factor: rata-rata 2-3 tahun terakhir yang tersedia (bukan asumsi
+    // industri generik), fallback 80% kalau data LF belum ada.
+    const lfYrs = yrs.slice(-3).filter(y=>HIST.lf[y]&&HIST.lf[y].some(v=>v>0));
+    const avgLF = lfYrs.length
+      ? lfYrs.reduce((s,y)=>s+(HIST.lf[y].filter(v=>v>0).reduce((a,b)=>a+b,0)/HIST.lf[y].filter(v=>v>0).length),0)/lfYrs.length
+      : 0.80;
+    const movementsPerYear = freq * 52 * W.maskapai;
+    let addAbsolute = 0; // dalam satuan yang sama dengan baseFc (Juta/Ribu AC/Ton)
+    if(metric==='pax')        addAbsolute = (acType.seats * avgLF * movementsPerYear) / 1e6;
+    else if(metric==='ac')    addAbsolute = movementsPerYear / 1e3;
+    else if(metric==='cargo') addAbsolute = acType.cargoTon * avgLF * movementsPerYear;
+    const base1 = baseFc[0] || histVals[histVals.length-1] || 1;
+    return (addAbsolute / base1) * 100;
+  })();
+
   // Keputusan operasional → dampak ke metrik
   const opImpact = (()=>{
     let pct = 0;
@@ -9254,9 +9210,11 @@ function runWhatif(silent){
     pct += W.rute * ruteFactor;
     // Kapasitas terminal: membuka potensi pertumbuhan jangka panjang
     pct += W.kapasitas * 0.3;
-    // Maskapai baru: setiap maskapai → +1.5% pax, +2% AC
-    const maskapaiFactor = metric==='ac' ? 2.0 : metric==='cargo' ? 0.8 : 1.5;
-    pct += W.maskapai * maskapaiFactor;
+    // Maskapai baru: dihitung dari kapasitas riil (kursi/kargo tipe pesawat ×
+    // frekuensi × Load Factor historis KNO), BUKAN persentase asumsi tetap.
+    // Definisi frekuensi: pergerakan/minggu per maskapai (gabungan datang+pergi;
+    // 1 pergerakan = 1 flight leg yang mengangkut kursi terisi seberapa pun LF-nya).
+    pct += maskapaiPct;
     // Frekuensi: langsung ke AC, efek ke pax lebih kecil
     const frekFactor = metric==='ac' ? 0.8 : metric==='cargo' ? 0.4 : 0.5;
     pct += W.frekuensi * frekFactor;
@@ -9541,7 +9499,7 @@ function runWhatif(silent){
       {l:'Event +'+W.event+'%',   v:+(W.event*0.28).toFixed(2),   c:'var(--green2)'},
       {l:W.rute+' Rute Baru',     v:+(W.rute*0.8).toFixed(2),     c:'var(--teal2)'},
       {l:'Kapasitas +'+W.kapasitas+'%', v:+(W.kapasitas*0.3).toFixed(2), c:'var(--teal2)'},
-      {l:W.maskapai+' Maskapai',  v:+(W.maskapai*1.5).toFixed(2), c:'var(--teal2)'},
+      {l:W.maskapai+' Maskapai ('+(AIRCRAFT_TYPES[W.maskapaiTipe]||AIRCRAFT_TYPES.b737).label+')',  v:+maskapaiPct.toFixed(2), c:'var(--teal2)'},
       {l:'Frekuensi +'+W.frekuensi+'%', v:+(W.frekuensi*0.5).toFixed(2), c:'var(--teal2)'},
     ].filter(f=>parseFloat(f.v)!==0);
 
@@ -9558,7 +9516,7 @@ function runWhatif(silent){
   // AI Analisis
   const aiEl=$('wi-ai');
   if(aiEl){
-    const top = faktors_top(W);
+    const top = faktors_top(W, maskapaiPct);
     aiEl.innerHTML=`
       Simulasi <strong>${mc.label}</strong> dengan metode <strong>${methodLabel}</strong>:<br><br>
       Baseline ${futYrs[0]}: <strong style="color:var(--blue2)">${fmtVal(b0,mc.unit)}</strong> →
@@ -9585,11 +9543,12 @@ function runWhatif(silent){
   wiRenderScenarios();
 }
 
-function faktors_top(W){
+function faktors_top(W, maskapaiPctOverride){
+  const maskapaiPct = maskapaiPctOverride!==undefined ? maskapaiPctOverride : W.maskapai*1.5;
   return [
     {l:'GDP',v:W.gdp*0.85},{l:'Wisatawan',v:W.tourism*0.42},
     {l:'Event',v:W.event*0.28},{l:'Rute',v:W.rute*0.8},
-    {l:'Maskapai',v:W.maskapai*1.5},
+    {l:'Maskapai',v:maskapaiPct},
   ].sort((a,b)=>Math.abs(b.v)-Math.abs(a.v))[0]||{l:'—',v:0};
 }
 
@@ -9669,7 +9628,8 @@ function wiSaveScenario(){
     futYrs:[...lr.futYrs],
     params:{gdp:W.gdp,inflasi:W.inflasi,avtur:W.avtur,tourism:W.tourism,
             event:W.event,rute:W.rute,kapasitas:W.kapasitas,
-            maskapai:W.maskapai,frekuensi:W.frekuensi},
+            maskapai:W.maskapai,maskapaiTipe:W.maskapaiTipe,maskapaiFreq:W.maskapaiFreq,
+            frekuensi:W.frekuensi},
   });
 
   const card=$('wi-scenarios-card');
@@ -9688,6 +9648,7 @@ function wiResetParams(){
   const W=STATE.WI;
   W.gdp=5.1; W.inflasi=3.2; W.avtur=0; W.tourism=8.4; W.event=5;
   W.rute=0; W.kapasitas=0; W.maskapai=0; W.frekuensi=0;
+  W.maskapaiTipe='b737'; W.maskapaiFreq=7;
   killCharts(); whatif();
 }
 
