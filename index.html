@@ -3199,12 +3199,14 @@ function calcDailyForecast(targetDate){
     else if(rute==='int') { f=intF;      p=intP;      c=intC; }
     else                  { f=domF+intF; p=domP+intP; c=domC+intC; }
 
-    return { jam:h, flight:Math.round(f), pax:Math.round(p), cargo:+c.toFixed(2) };
+    return { jam:h, flight:Math.round(f), pax:Math.round(p), cargo:+c.toFixed(2), domPax:domP, intPax:intP };
   });
 
   const totalF = hourly.reduce((s,h)=>s+h.flight, 0);
   const totalP = hourly.reduce((s,h)=>s+h.pax,    0);
   const totalC = +hourly.reduce((s,h)=>s+h.cargo,  0).toFixed(1);
+  const totalDomPax = hourly.reduce((s,h)=>s+(h.domPax||0), 0);
+  const totalIntPax = hourly.reduce((s,h)=>s+(h.intPax||0), 0);
 
   const peakFlight = hourly.reduce((mx,h)=>h.flight>mx.flight?h:mx, hourly[0]);
   const peakPax    = hourly.reduce((mx,h)=>h.pax>mx.pax?h:mx,       hourly[0]);
@@ -3219,7 +3221,7 @@ function calcDailyForecast(targetDate){
 
   return {
     error: null, date:targetDate, rute, dataSource, dowName,
-    total:{ flight:totalF, pax:totalP, cargo:totalC },
+    total:{ flight:totalF, pax:totalP, cargo:totalC, domPax:totalDomPax, intPax:totalIntPax },
     hourly, peakFlight, peakPax,
     nSamples, daysInMon,
     domN: dom?.n || 0, intN: int_?.n || 0
@@ -3431,6 +3433,100 @@ async function handleDailyUpload(input, rute){
   }
 }
 
+// ── Kartu Pendapatan Aero & Non-Aero (Daily Forecasting) ────────────
+// Otomatis kehitung dari fc.total (pax harian), termasuk saat rute
+// Dom+Int digabung — PSC tetap dihitung per-rute lalu dijumlah (fc.total.domPax/intPax
+// disimpan terpisah oleh calcDailyForecast meski tampilan gabungan).
+function dailyRevenueCards(fc){
+  if(!STATE.RP) STATE.RP = {};
+  const R = STATE.RP;
+  if(R.pscDom===undefined)           R.pscDom = 127650;
+  if(R.pscInt===undefined)           R.pscInt = 266400;
+  if(R.berangkatPct===undefined)     R.berangkatPct = 50;
+  if(R.participationPct===undefined) R.participationPct = 5;
+  if(R.avgSpend===undefined)         R.avgSpend = 72000;
+  if(R.revShare===undefined)         R.revShare = 15; // % revenue sharing tenant → bandara
+
+  const domPax = fc.total.domPax || (fc.rute==='dom' ? fc.total.pax : 0);
+  const intPax = fc.total.intPax || (fc.rute==='int' ? fc.total.pax : 0);
+
+  const domBerangkat = domPax * (R.berangkatPct/100);
+  const intBerangkat = intPax * (R.berangkatPct/100);
+  const aeroDom = domBerangkat * R.pscDom;
+  const aeroInt = intBerangkat * R.pscInt;
+  const aeroTotal = aeroDom + aeroInt;
+
+  const pembelanja = fc.total.pax * (R.participationPct/100);
+  const tenantSpendTotal = pembelanja * R.avgSpend; // omzet tenant, BUKAN pendapatan bandara
+  const nonAeroTotal = tenantSpendTotal * (R.revShare/100); // bagian revenue sharing ke bandara
+
+  return `
+  <div class="g2" style="margin-bottom:8px">
+    <div class="card" style="text-align:center;border:1px solid rgba(20,184,166,.2)">
+      <div style="font-size:10px;color:var(--t3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">✈ Pendapatan Aero</div>
+      <div style="font-size:20px;font-weight:900;color:var(--teal2)">${fmtRp(aeroTotal)}</div>
+      <div style="font-size:12px;color:var(--t1);margin-top:10px;padding-top:10px;border-top:1px solid var(--bdr);line-height:1.8">
+        <div>Domestik: <strong style="color:var(--teal2)">${fmtRp(aeroDom)}</strong> <span style="color:var(--t3)">(${Math.round(domBerangkat).toLocaleString('id-ID')} pax)</span></div>
+        <div>Internasional: <strong style="color:var(--teal2)">${fmtRp(aeroInt)}</strong> <span style="color:var(--t3)">(${Math.round(intBerangkat).toLocaleString('id-ID')} pax)</span></div>
+      </div>
+    </div>
+    <div class="card" style="text-align:center;border:1px solid rgba(167,139,250,.2)">
+      <div style="font-size:10px;color:var(--t3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">🛍 Pendapatan Non-Aero</div>
+      <div style="font-size:20px;font-weight:900;color:#a78bfa">${fmtRp(nonAeroTotal)}</div>
+      <div style="font-size:12px;color:var(--t1);margin-top:10px;padding-top:10px;border-top:1px solid var(--bdr);line-height:1.8">
+        <div><strong style="color:#a78bfa">${Math.round(pembelanja).toLocaleString('id-ID')} pembelanja</strong>
+        <span style="color:var(--t3)">(${R.participationPct}% dari ${fc.total.pax.toLocaleString('id-ID')} pax)</span></div>
+        <div>Omzet Tenant: <strong style="color:var(--t2)">${fmtRp(tenantSpendTotal)}</strong>
+        <span style="color:var(--t3)">→ Revenue Share ${R.revShare}%</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="display:flex;align-items:center;justify-content:space-between;
+              padding:12px 18px;margin-bottom:8px;background:linear-gradient(90deg,rgba(20,184,166,.08),rgba(167,139,250,.08));
+              border:1px solid var(--bdr)">
+    <span style="font-size:11px;font-weight:700;color:var(--t2);text-transform:uppercase;letter-spacing:.5px">
+      💵 Total Pendapatan (Aero + Non-Aero)
+    </span>
+    <span style="font-size:17px;font-weight:900;color:var(--green2)">${fmtRp(aeroTotal + nonAeroTotal)}</span>
+  </div>
+  <div style="margin:2px 0 10px">
+    <button id="df-rev-toggle" onclick="const e=$('df-rev-assump');const btn=$('df-rev-toggle');
+      const open=e.style.display==='none'; e.style.display=open?'block':'none';
+      btn.innerHTML=(open?'▲ Tutup':'✎ Edit Asumsi Tarif &amp; Belanja');"
+      style="display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:var(--t1);
+             background:var(--card2);border:1px solid var(--bdr);border-radius:7px;cursor:pointer;
+             padding:8px 14px;width:100%;justify-content:center">
+      ✎ Edit Asumsi Tarif &amp; Belanja
+    </button>
+  </div>
+  <div id="df-rev-assump" class="card" style="display:none;margin-bottom:12px">
+    <div style="font-size:9px;color:var(--amber2);margin-bottom:8px">
+      Nilai default, bukan tarif resmi terverifikasi — sesuaikan bila ada perubahan tarif/kondisi.
+    </div>
+    <div class="g2" style="gap:4px 16px">
+      ${dfRevInput('pscDom','Tarif PSC Domestik (Rp/pax berangkat)',R.pscDom)}
+      ${dfRevInput('pscInt','Tarif PSC Internasional (Rp/pax berangkat)',R.pscInt)}
+      ${dfRevInput('berangkatPct','% Pax Berangkat dari Total',R.berangkatPct,'%')}
+      ${dfRevInput('participationPct','% Pax yang Belanja (F&B+Retail)',R.participationPct,'%')}
+      ${dfRevInput('avgSpend','Rata-rata Belanja per Pembelanja di Tenant (Rp)',R.avgSpend)}
+      ${dfRevInput('revShare','Revenue Sharing Tenant → Bandara',R.revShare,'%')}
+    </div>
+  </div>`;
+}
+
+function dfRevInput(id, label, val, suffix=''){
+  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 4px">
+    <span style="font-size:10px;color:var(--t2)">${label}</span>
+    <div style="display:flex;align-items:center;gap:4px">
+      <input type="number" value="${val}" min="0" step="${suffix==='%'?0.5:1000}"
+        onchange="STATE.RP['${id}']=parseFloat(this.value)||0;buildDailyResult()"
+        style="width:100px;background:var(--card2);border:1px solid var(--bdr);border-radius:5px;
+               color:var(--t1);font-size:11px;font-weight:700;padding:3px 6px;text-align:right">
+      <span style="font-size:10px;color:var(--t3);min-width:12px">${suffix}</span>
+    </div>
+  </div>`;
+}
+
 // ── Render hasil proyeksi ───────────────────────────────────────────
 function buildDailyResult(){
   const el = document.getElementById('df-result');
@@ -3595,6 +3691,9 @@ function buildDailyResult(){
         <div style="font-size:10px;color:var(--t2);margin-top:8px;padding-top:8px;border-top:1px solid var(--bdr)">Dari pola historis</div>
       </div>
     </div>
+
+    ${dailyRevenueCards(fc)}
+
     <div class="card" style="margin-bottom:12px">
       <div class="card-hdr">
         <span class="card-title">📊 Distribusi Per Jam — ${dateLabel}</span>
@@ -9692,6 +9791,11 @@ function wiRenderScenarios(){
     </tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`;
+}
+
+function fmtRp(v){
+  // Nilai penuh, tanpa singkatan (M/Jt/T) — biar angka pastinya kelihatan
+  return 'Rp '+Math.round(v).toLocaleString('id-ID');
 }
 
 // ═══════════════════════════════════════════════════════════════════
