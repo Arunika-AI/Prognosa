@@ -7525,6 +7525,37 @@ function computeMonthlyHistoricalProp(metric, rute, yrsArr){
   return Array(12).fill(1/12);
 }
 
+// Jumlah AKTUAL (bulan yang sudah terjadi) untuk tahun berjalan/parsial —
+// dipakai untuk memisahkan bagian "sudah pasti terjadi" (tidak boleh diubah
+// skenario apa pun) dari bagian "masih proyeksi" (Jul-Des, boleh dipengaruhi
+// skenario pertumbuhan/what-if). Pola sama dipakai What-if Simulator.
+function getPartialYearActualSum(metric, rute, partialYr, partialM){
+  let sum = 0;
+  for(let mi=0; mi<partialM; mi++){
+    if(metric==='pax'){
+      let arr = rute==='dom' ? (HIST.paxActualDom[partialYr]||[])
+              : rute==='int' ? (HIST.paxActualInt[partialYr]||[])
+              : (HIST.paxActual[partialYr]||[]);
+      if(arr.some(v=>v>0)){ sum += (arr[mi]||0)/1e6; continue; }
+      const paxTot = (HIST.pax[partialYr]||[])[mi]||0;
+      if(rute==='dom'){ const p=DB.pax&&DB.pax[partialYr]&&DB.pax[partialYr].total>0?(DB.pax[partialYr].dom||0)/DB.pax[partialYr].total:0.75; sum += paxTot*p; }
+      else if(rute==='int'){ const p=DB.pax&&DB.pax[partialYr]&&DB.pax[partialYr].total>0?(DB.pax[partialYr].intl||0)/DB.pax[partialYr].total:0.25; sum += paxTot*p; }
+      else sum += paxTot;
+    } else if(metric==='ac'){
+      let arr = rute==='dom' ? (HIST.acDom[partialYr]||HIST.ac[partialYr]||[])
+              : rute==='int' ? (HIST.acInt[partialYr]||[])
+              : (HIST.ac[partialYr]||[]);
+      sum += (arr[mi]||0)/1e3;
+    } else {
+      let arr = rute==='dom' ? (HIST.cargoDom[partialYr]||HIST.cargo[partialYr]||[])
+              : rute==='int' ? (HIST.cargoInt[partialYr]||[])
+              : (HIST.cargo[partialYr]||[]);
+      sum += (arr[mi]||0);
+    }
+  }
+  return sum;
+}
+
 function computePartialYearBaseline(metric, rute, method){
   // Versi standalone dari kalkulasi baseline tahun parsial (mis. 2026 Jul-Des)
   // yang dipakai BERSAMA oleh Forecasting Center dan Risk & Scenario,
@@ -7959,6 +7990,18 @@ function risk(){
           ${FC_METHODS.map(m=>`<option value="${m.id}" ${selMethod===m.id?'selected':''}>${m.label}</option>`).join('')}
         </select>
 
+        <!-- Dropdown Skenario Pertumbuhan (menggantikan kolom Pes/Mod/Opt terpisah) -->
+        <select id="risk-dd-growth"
+          onchange="STATE.riskGrowthScenario=this.value;killCharts();risk()"
+          style="padding:5px 10px;border-radius:7px;border:1px solid var(--bdr);
+                 background:var(--card2);font-size:11px;font-weight:600;
+                 color:${(STATE.riskGrowthScenario||'baseline')==='baseline'?'var(--t1)':(STATE.riskGrowthScenario==='pesimis'?'var(--red2)':STATE.riskGrowthScenario==='moderat'?'var(--amber2)':'var(--green2)')}">
+          <option value="baseline" ${(STATE.riskGrowthScenario||'baseline')==='baseline'?'selected':''}>📊 Baseline Normal</option>
+          <option value="pesimis" ${STATE.riskGrowthScenario==='pesimis'?'selected':''}>🔻 Pesimis (+1%)</option>
+          <option value="moderat" ${STATE.riskGrowthScenario==='moderat'?'selected':''}>➖ Moderat (+3%)</option>
+          <option value="optimis" ${STATE.riskGrowthScenario==='optimis'?'selected':''}>🔺 Optimis (+5%)</option>
+        </select>
+
         <!-- Toggle Tahunan / Bulanan -->
         <div style="display:flex;background:var(--card2);border:1px solid var(--bdr);border-radius:7px;overflow:hidden">
           <button id="risk-btn-annual"
@@ -8153,12 +8196,16 @@ function risk(){
         <span style="font-size:13px;font-weight:700;color:var(--amber2)">${s.rec} bulan</span>
       </div>
       <div id="risk-ai-box">
-        ${mkAI('AI Risk',
+        ${(()=>{
+          const gMult = {baseline:1, pesimis:1.01, moderat:1.03, optimis:1.05}[STATE.riskGrowthScenario||'baseline'];
+          const baseAdj = (bestFc[0]||0) * gMult;
+          return mkAI('AI Risk',
           'Skenario <strong>'+s.n+'</strong> · '+mc.label+' ('+mLabel+'): '+
-          'baseline <strong>'+fmtVal(bestFc[0]||0,unit)+'</strong> → '+
-          'terdampak <strong>'+fmtVal((bestFc[0]||0)*sf,unit)+'</strong> '+
+          'baseline <strong>'+fmtVal(baseAdj,unit)+'</strong> → '+
+          'terdampak <strong>'+fmtVal(baseAdj*sf,unit)+'</strong> '+
           '('+(shockPct>0?'+':'')+shockPct+'%). '+s.mitigation
-        )}
+          );
+        })()}
       </div>
     </div>
 
@@ -8192,6 +8239,9 @@ function risk(){
     const sel=$('risk-method-sel'); if(sel) sel.value=selMethod;
 
     const datasets=[];
+    // Terapkan skenario pertumbuhan yang sama dengan tabel, biar chart & tabel konsisten
+    const gMultChart = {baseline:1, pesimis:1.01, moderat:1.03, optimis:1.05}[STATE.riskGrowthScenario||'baseline'];
+    const bestFcAdj = bestFc.map(v=>v*gMultChart);
     datasets.push({
       label:'Historis '+mc.label,
       data:[...histVals,...Array(HORIZON).fill(null)],
@@ -8206,7 +8256,7 @@ function risk(){
           borderDash:m.dash,pointRadius:m.id===selMethod?3:2,tension:.4,fill:false,
         });
       });
-      const shockFc=bestFc.map(v=>+(v*sf).toFixed(4));
+      const shockFc=bestFcAdj.map(v=>+(v*sf).toFixed(4));
       datasets.push({
         label:s.ic+' '+s.n,
         data:[...Array(yrs.length-1).fill(null),histVals[histVals.length-1],...shockFc],
@@ -8214,10 +8264,10 @@ function risk(){
         backgroundColor:s.color+'20',fill:false,
       });
     } else {
-      const shockFc=bestFc.map(v=>+(v*sf).toFixed(4));
+      const shockFc=bestFcAdj.map(v=>+(v*sf).toFixed(4));
       datasets.push({
         label:'Baseline ('+mLabel+')',
-        data:[...Array(yrs.length-1).fill(null),histVals[histVals.length-1],...bestFc],
+        data:[...Array(yrs.length-1).fill(null),histVals[histVals.length-1],...bestFcAdj],
         borderColor:mc.color,borderWidth:2,borderDash:[5,3],pointRadius:3,tension:.4,fill:false,
       });
       datasets.push({
@@ -8571,13 +8621,18 @@ function riskBuildMatriks(){
   if(hasPartialRisk && selYear===partialYrRisk){
     const pb = computePartialYearBaseline(selMetric, riskRute, selMethod);
     base = (pb && isFinite(pb.fullEst)) ? pb.fullEst : dataLast;
+    const gMultMxP = {baseline:1, pesimis:1.01, moderat:1.03, optimis:1.05}[STATE.riskGrowthScenario||'baseline'];
+    base = base * gMultMxP;
   } else {
     const idxInBase = hasPartialRisk ? futYrs.indexOf(selYear)-1 : futYrs.indexOf(selYear);
     base = (bestFc[idxInBase]!==undefined) ? bestFc[idxInBase] : (bestFc[0]||dataLast);
+    const growthMultMx = {baseline:1, pesimis:1.01, moderat:1.03, optimis:1.05}[STATE.riskGrowthScenario||'baseline'];
+    base = base * growthMultMx;
   }
 
   const subEl = $('risk-matriks-sub');
-  if(subEl) subEl.textContent = mLabel+' · '+selYear+(hasPartialRisk && selYear===partialYrRisk?' (Berjalan)':'');
+  const gsLabel = {baseline:'', pesimis:' · Pesimis+1%', moderat:' · Moderat+3%', optimis:' · Optimis+5%'}[STATE.riskGrowthScenario||'baseline'];
+  if(subEl) subEl.textContent = mLabel+' · '+selYear+(hasPartialRisk && selYear===partialYrRisk?' (Berjalan)':'')+gsLabel;
 
   const unitSuf = unit==='Juta' ? 'Jt' : unit==='Ribu AC' ? ' Rb AC' : unit==='Ton' ? ' Ton' : '';
   const dec = unit==='Ton' ? 1 : 2;
@@ -8674,13 +8729,20 @@ function riskBuildTable(){
           base = +(histAnn + avgMonth * remainMonths * 0.5).toFixed(4);
           if(base <= 0) base = dataLast;
         }
+        // Skenario pertumbuhan diterapkan langsung ke seluruh angka setahun,
+        // SAMA seperti cara FC (baseline × multiplier), tanpa pisah aktual/proyeksi —
+        // konsisten dengan tabel Bulanan yang sudah disamakan ke FC sebelumnya.
+        const gMultPartial = {baseline:1, pesimis:1.01, moderat:1.03, optimis:1.05}[STATE.riskGrowthScenario||'baseline'];
+        base = base * gMultPartial;
       } else {
         base = bestFc[yiBase>=0?yiBase:yi]||dataLast;
+        // Skenario pertumbuhan (menggantikan kolom Pes/Mod/Opt terpisah) — hanya
+        // berlaku untuk tahun forecast murni, TIDAK untuk tahun berjalan/parsial
+        // (baseline tahun berjalan sudah punya mekanisme blend sendiri).
+        const growthMult = {baseline:1, pesimis:1.01, moderat:1.03, optimis:1.05}[STATE.riskGrowthScenario||'baseline'];
+        base = base * growthMult;
       }
       const shock  = base*sf;
-      const pes    = shock*1.01;
-      const mod    = shock*1.03;
-      const opt    = shock*1.05;
 
       const prevBase  = (!isPartialYr&&yi===0) ? prevHist : (isPartialYr?prevHist:(bestFc[yi-1+(hasPartialRisk?1:0)]||prevHist));
       const grBase    = prevBase>0 ? ((base-prevBase)/prevBase*100) : 0;
@@ -8706,18 +8768,6 @@ function riskBuildTable(){
           <div style="font-weight:800;color:${s.color}">${fmtVal(shock,unit)}</div>
           <div style="font-size:9px;color:${grCol(grShock)};margin-top:2px">▲ Growth: ${grStr(grShock)}</div>
         </td>
-        <td class="td-r" style="color:var(--red2)">
-          ${fmtVal(pes,unit)}
-          <div style="font-size:9px;color:var(--t3)">+1% dari terdampak</div>
-        </td>
-        <td class="td-r" style="color:var(--amber2);font-weight:600">
-          ${fmtVal(mod,unit)}
-          <div style="font-size:9px;color:var(--t3)">+3% dari terdampak</div>
-        </td>
-        <td class="td-r" style="color:var(--green2)">
-          ${fmtVal(opt,unit)}
-          <div style="font-size:9px;color:var(--t3)">+5% dari terdampak</div>
-        </td>
         <td class="td-r">
           <span style="font-weight:700;font-size:12px;color:${grCol(grBase)}">${grStr(grBase)}</span>
           <div style="font-size:9px;color:var(--t3)">YoY baseline</div>
@@ -8725,15 +8775,13 @@ function riskBuildTable(){
       </tr>`;
     });
 
+    const growthLabel = {baseline:'(Tanpa Skenario)', pesimis:'(Pesimis +1%)', moderat:'(Moderat +3%)', optimis:'(Optimis +5%)'}[STATE.riskGrowthScenario||'baseline'];
     tblEl.innerHTML=`<div style="overflow-x:auto">
       <table>
         <thead><tr style="background:var(--card2)">
           <th style="min-width:60px">Tahun</th>
-          <th class="td-r" style="color:var(--t2);min-width:130px">Baseline<br><small style="font-weight:400">(Tanpa Skenario)</small></th>
+          <th class="td-r" style="color:var(--t2);min-width:130px">Baseline<br><small style="font-weight:400">${growthLabel}</small></th>
           <th class="td-r" style="color:${s.color};min-width:130px">Terdampak<br><small style="font-weight:400">${s.ic} ${shockPct>0?'+':''}${shockPct}%</small></th>
-          <th class="td-r" style="color:var(--red2);min-width:120px">Pesimis<br><small style="font-weight:400">+1%</small></th>
-          <th class="td-r" style="color:var(--amber2);min-width:120px">Moderat<br><small style="font-weight:400">+3%</small></th>
-          <th class="td-r" style="color:var(--green2);min-width:120px">Optimis<br><small style="font-weight:400">+5%</small></th>
           <th class="td-r" style="min-width:90px">Growth<br><small style="font-weight:400">Prognosa</small></th>
         </tr></thead>
         <tbody>${rows}</tbody>
@@ -8796,10 +8844,15 @@ function riskBuildTable(){
             if(bAnn <= 0) bAnn = dataLast;
           }
         }
+        // Growth scenario TIDAK di-apply ke bAnn di sini lagi (lihat di bawah) —
+        // bAnn tetap murni baseline (identik dengan FC), skenario diterapkan
+        // per-bulan langsung di titik render, sama seperti cara FC menghitung
+        // Pesimis/Moderat/Optimis-nya sendiri (baseline_bulan × multiplier).
       } else {
         bAnn = bestFc[yiBase2>=0?yiBase2:yi]||dataLast;
       }
-      const sAnn = bAnn*sf;
+      const gMultRow = {baseline:1, pesimis:1.01, moderat:1.03, optimis:1.05}[STATE.riskGrowthScenario||'baseline'];
+      const sAnn = bAnn*gMultRow*sf;
       // Untuk partial year: hanya tampilkan bulan Jul-Des (partialMRisk ke 11)
       const startMonth = isPartialYr ? partialMRisk : 0;
       const allMonths  = Array.from({length:12},(_,i)=>i);
@@ -8809,7 +8862,7 @@ function riskBuildTable(){
         : availMonths;
 
       if(isPartialYr && idx===0){
-        rows+=`<tr><td colspan="8" style="font-size:10px;color:var(--amber2);padding:6px 10px;
+        rows+=`<tr><td colspan="5" style="font-size:10px;color:var(--amber2);padding:6px 10px;
           background:rgba(245,158,11,.06);border-bottom:1px solid rgba(245,158,11,.2);font-weight:600">
           ⚡ ${y} — Proyeksi Sisa Tahun (${['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Ags','Sep','Okt','Nov','Des'][startMonth]}–Des)
           <span style="font-size:9px;color:var(--t3);font-weight:400;margin-left:8px">
@@ -8818,17 +8871,22 @@ function riskBuildTable(){
         </td></tr>`;
       }
 
+      let bAnnScaledSum = 0; // akumulasi bulan yang ditampilkan × skenario, untuk baris Total
+      let dailyBaseSum = 0, dailyShockSum = 0, dailyCount = 0; // buat rata-rata harian (Cara B)
       monthIdxs.forEach((mi,mloop)=>{
         const prop = histProp[mi]||1/12;
-        const bM   = bAnn*prop;
+        const bM   = bAnn*prop*gMultRow;
         const sM   = bM*sf;
-        const pes  = sM*1.01;
-        const mod  = sM*1.03;
-        const opt  = sM*1.05;
+        bAnnScaledSum += bM;
 
         const prevProp = mi>0 ? (histProp[mi-1]||1/12) : (histProp[11]||1/12);
         const prevBM   = bAnn*prevProp;
         const grM      = prevBM>0 ? ((bM-prevBM)/prevBM*100) : 0;
+
+        const daysInM  = new Date(y, mi+1, 0).getDate();
+        dailyBaseSum += bM/daysInM;
+        dailyShockSum += sM/daysInM;
+        dailyCount++;
 
         const isFirst  = mloop===0;
         rows+=`<tr style="background:${isFirst?'rgba(59,130,246,.04)':''}">
@@ -8836,9 +8894,6 @@ function riskBuildTable(){
           <td style="color:var(--t2)">${mNames[mi]}</td>
           <td class="td-r" style="font-weight:600;color:var(--t1)">${fmtVal(bM,unit)}</td>
           <td class="td-r" style="font-weight:700;color:${s.color}">${fmtVal(sM,unit)}</td>
-          <td class="td-r" style="color:var(--red2)">${fmtVal(pes,unit)}</td>
-          <td class="td-r" style="color:var(--amber2);font-weight:600">${fmtVal(mod,unit)}</td>
-          <td class="td-r" style="color:var(--green2)">${fmtVal(opt,unit)}</td>
           <td class="td-r">
             <span style="color:${grM>=0?'var(--green2)':'var(--red2)'};font-weight:600;font-size:11px">
               ${grM>=0?'+':''}${grM.toFixed(1)}%
@@ -8848,18 +8903,30 @@ function riskBuildTable(){
       });
 
       if(filterMonth<0){
+        // Total 2026 = baseline setahun penuh × skenario, SAMA seperti FC
+        // (bukan lagi pisah aktual/proyeksi) — konsisten dengan tabel Tahunan & Matriks Risiko.
+        const totalBaseline = isPartialYr ? bAnn*gMultRow : bAnnScaledSum;
         rows+=`<tr style="border-top:2px solid rgba(59,130,246,.3);background:rgba(59,130,246,.08);font-weight:700">
           <td colspan="2" style="color:var(--blue2)">∑ Total ${y}</td>
-          <td class="td-r" style="color:var(--t1)">${fmtVal(bAnn,unit)}</td>
-          <td class="td-r" style="color:${s.color}">${fmtVal(sAnn,unit)}</td>
-          <td class="td-r" style="color:var(--red2)">${fmtVal(sAnn*1.01,unit)}</td>
-          <td class="td-r" style="color:var(--amber2)">${fmtVal(sAnn*1.03,unit)}</td>
-          <td class="td-r" style="color:var(--green2)">${fmtVal(sAnn*1.05,unit)}</td>
+          <td class="td-r" style="color:var(--t1)">${fmtVal(totalBaseline,unit)}</td>
+          <td class="td-r" style="color:${s.color}">${fmtVal(totalBaseline*sf,unit)}</td>
           <td class="td-r" style="color:${sf<1?'var(--red2)':'var(--green2)'}">
             ${shockPct>0?'+':''}${shockPct}% shock
           </td>
-        </tr>
-        <tr><td colspan="8" style="height:5px"></td></tr>`;
+        </tr>`;
+      }
+      // Rata-rata Harian: tampil terus, baik "Semua Bulan" maupun difilter ke 1 bulan
+      // (kalau difilter 1 bulan, ini otomatis jadi rata-rata harian bulan itu saja).
+      if(dailyCount>0){
+        rows+=`<tr style="background:rgba(255,255,255,.02);${filterMonth<0?'':'border-top:2px solid rgba(59,130,246,.3);'}">
+          <td colspan="2" style="color:var(--t3);font-size:11px">≈ Rata-rata Harian</td>
+          <td class="td-r" style="color:var(--t2);font-size:11px">${fmtVal(dailyBaseSum/dailyCount,unit)}<span style="color:var(--t3)">/hari</span></td>
+          <td class="td-r" style="color:${s.color};font-size:11px;opacity:.85">${fmtVal(dailyShockSum/dailyCount,unit)}<span style="color:var(--t3)">/hari</span></td>
+          <td></td>
+        </tr>`;
+      }
+      if(filterMonth<0){
+        rows+=`<tr><td colspan="5" style="height:5px"></td></tr>`;
       }
     });
 
@@ -8871,9 +8938,6 @@ function riskBuildTable(){
             <th style="min-width:50px">Bulan</th>
             <th class="td-r" style="color:var(--t2);min-width:120px">Baseline</th>
             <th class="td-r" style="color:${s.color};min-width:120px">Terdampak</th>
-            <th class="td-r" style="color:var(--red2);min-width:110px">Pesimis +1%</th>
-            <th class="td-r" style="color:var(--amber2);min-width:110px">Moderat +3%</th>
-            <th class="td-r" style="color:var(--green2);min-width:110px">Optimis +5%</th>
             <th class="td-r" style="min-width:80px">Growth</th>
           </tr>
         </thead>
@@ -8907,10 +8971,17 @@ function whatif(){
   if(W.selRute===undefined)   W.selRute='all';    // 'all'|'dom'|'int' — filter rute tampilan
   if(W.selPeriod===undefined) W.selPeriod='yearly'; // 'yearly'|'monthly'
   if(W.selYear===undefined)   W.selYear=null;      // diisi otomatis ke futYrs[0] saat render
+  if(W.growthScenario===undefined) W.growthScenario='baseline'; // 'baseline'|'pesimis'|'moderat'|'optimis'
   if(!STATE.WI_scenarios)   STATE.WI_scenarios=[];
 
   // Data aktual
-  const yrs    = (DB.hasData&&DB.years.length>0)?DB.years:getYears();
+  const yrsAllWI = (DB.hasData&&DB.years.length>0)?DB.years:getYears();
+  // PENTING: terapkan filter rentang tahun yang sama dengan FC (STATE.yrStart/yrEnd),
+  // supaya data historis yang masuk ke forecast identik panjangnya — sebelumnya
+  // What-if selalu pakai SEMUA tahun di data, walau FC mungkin cuma pakai sebagian
+  // rentang (badge "2023-2025" dkk), menyebabkan trajectory forecast sedikit beda.
+  const maxYrWI = yrsAllWI.length>0 ? Math.max(...yrsAllWI) : null;
+  const yrs    = yrsAllWI.filter(y => y >= (STATE.yrStart||yrsAllWI[0]) && y <= (STATE.yrEnd||maxYrWI));
   const lastY  = yrs[yrs.length-1]||STATE.yrEnd;
   const HORIZON = 5;
   const futYrs  = Array.from({length:HORIZON},(_,i)=>lastY+i+1);
@@ -9053,6 +9124,18 @@ function whatif(){
           </select>
         </div>
         <div>
+          <div style="font-size:9px;color:var(--t3);margin-bottom:4px">SKENARIO PERTUMBUHAN</div>
+          <select id="wi-growth-sel" onchange="STATE.WI.growthScenario=this.value;runWhatif()"
+            style="padding:5px 10px;border-radius:7px;border:1px solid var(--bdr);
+                   background:var(--card2);font-size:11px;font-weight:600;
+                   color:${W.growthScenario==='baseline'?'var(--t1)':W.growthScenario==='pesimis'?'var(--red2)':W.growthScenario==='moderat'?'var(--amber2)':'var(--green2)'}">
+            <option value="baseline" ${W.growthScenario==='baseline'?'selected':''}>📊 Baseline Normal</option>
+            <option value="pesimis" ${W.growthScenario==='pesimis'?'selected':''}>🔻 Pesimis (+1%)</option>
+            <option value="moderat" ${W.growthScenario==='moderat'?'selected':''}>➖ Moderat (+3%)</option>
+            <option value="optimis" ${W.growthScenario==='optimis'?'selected':''}>🔺 Optimis (+5%)</option>
+          </select>
+        </div>
+        <div>
           <div style="font-size:9px;color:var(--t3);margin-bottom:4px">RUTE</div>
           <div style="display:flex;background:var(--card2);border:1px solid var(--bdr);border-radius:7px;overflow:hidden">
             ${[['all','🌐 Total'],['dom','✈ Dom'],['int','🌏 Int']].map(([v,l])=>`
@@ -9109,34 +9192,32 @@ function whatif(){
     </div>
   </div>
 
-  <!-- ROW 2: Chart + Tabel -->
-  <div class="g23 mb14">
+  <!-- ROW 2: Tabel (di tengah/lebar penuh) lalu Chart di bawahnya -->
 
-    <!-- CHART -->
-    <div class="card">
-      <div class="card-hdr">
-        <span class="card-title" id="wi-chart-title">📈 Baseline vs Simulasi</span>
-        <span style="font-size:10px;color:var(--t3)" id="wi-chart-sub">Jalankan simulasi untuk melihat hasil</span>
-      </div>
-      <div class="ch-wrap" style="height:260px"><canvas id="c-wi"></canvas></div>
-      <!-- Delta bar -->
-      <div id="wi-delta-bar" style="display:none;margin-top:10px;padding:8px 12px;border-radius:7px;
-           background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2)">
-        <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px" id="wi-delta-items"></div>
+  <!-- TABEL HASIL PER TAHUN -->
+  <div class="card mb14">
+    <div class="card-hdr">
+      <span class="card-title">📋 Hasil Per Tahun</span>
+      <span class="bdg bdg-b" id="wi-tbl-badge">—</span>
+    </div>
+    <div id="wi-result-table">
+      <div style="color:var(--t3);padding:30px;text-align:center;font-size:12px">
+        Jalankan simulasi untuk melihat tabel hasil
       </div>
     </div>
+  </div>
 
-    <!-- TABEL HASIL PER TAHUN -->
-    <div class="card">
-      <div class="card-hdr">
-        <span class="card-title">📋 Hasil Per Tahun</span>
-        <span class="bdg bdg-b" id="wi-tbl-badge">—</span>
-      </div>
-      <div id="wi-result-table">
-        <div style="color:var(--t3);padding:30px;text-align:center;font-size:12px">
-          Jalankan simulasi untuk melihat tabel hasil
-        </div>
-      </div>
+  <!-- CHART -->
+  <div class="card mb14">
+    <div class="card-hdr">
+      <span class="card-title" id="wi-chart-title">📈 Baseline vs Simulasi</span>
+      <span style="font-size:10px;color:var(--t3)" id="wi-chart-sub">Jalankan simulasi untuk melihat hasil</span>
+    </div>
+    <div class="ch-wrap" style="height:260px"><canvas id="c-wi"></canvas></div>
+    <!-- Delta bar -->
+    <div id="wi-delta-bar" style="display:none;margin-top:10px;padding:8px 12px;border-radius:7px;
+         background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2)">
+      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px" id="wi-delta-items"></div>
     </div>
   </div>
 
@@ -9192,7 +9273,13 @@ function runWhatif(silent){
   const metric = W.selMetric||'pax';
   const method = W.method||'holt-winters';
 
-  const yrs    = (DB.hasData&&DB.years.length>0)?DB.years:getYears();
+  const yrsAllWI = (DB.hasData&&DB.years.length>0)?DB.years:getYears();
+  // PENTING: terapkan filter rentang tahun yang sama dengan FC (STATE.yrStart/yrEnd),
+  // supaya data historis yang masuk ke forecast identik panjangnya — sebelumnya
+  // What-if selalu pakai SEMUA tahun di data, walau FC mungkin cuma pakai sebagian
+  // rentang (badge "2023-2025" dkk), menyebabkan trajectory forecast sedikit beda.
+  const maxYrWI = yrsAllWI.length>0 ? Math.max(...yrsAllWI) : null;
+  const yrs    = yrsAllWI.filter(y => y >= (STATE.yrStart||yrsAllWI[0]) && y <= (STATE.yrEnd||maxYrWI));
   const lastY  = yrs[yrs.length-1]||STATE.yrEnd;
   const HORIZON = 5;
   const futYrs  = Array.from({length:HORIZON},(_,i)=>lastY+i+1);
@@ -9258,7 +9345,9 @@ function runWhatif(silent){
     }catch(e){ return Array(HORIZON).fill(+(histVals[histVals.length-1]*1.03).toFixed(6)); }
   }
 
-  const baseFc = runFc(method, histVals);
+  const baseFcRaw = runFc(method, histVals);
+  const gMultWI = {baseline:1, pesimis:1.01, moderat:1.03, optimis:1.05}[W.growthScenario||'baseline'];
+  const baseFc = baseFcRaw.map(v=>v*gMultWI);
 
   // ── HITUNG FAKTOR DAMPAK ─────────────────────────────────────
   // Faktor eksternal → dampak ke metrik
@@ -9373,13 +9462,21 @@ function runWhatif(silent){
 
     const pMonthly = MONTHS_SHORT_P.map((mn,mi)=>{
       const isActual = mi < partialM;
-      const bM = isActual ? getActualMonthlyWI(mi) : fullEst*(propP[mi]||1/12);
+      // Skenario pertumbuhan sekarang diterapkan ke SEMUA bulan (termasuk yang
+      // sumbernya data aktual), sesuai keputusan: samakan persis dengan FC yang
+      // tidak membedakan aktual/proyeksi saat skenario diterapkan.
+      const bM = (isActual ? getActualMonthlyWI(mi) : fullEst*(propP[mi]||1/12)) * gMultWI;
       const sM = isActual ? bM : bM*(1+totalImpact*rampUp[0]/100);
       return {mn, mi, isActual, bM:+bM.toFixed(6), sM:+sM.toFixed(6)};
     });
 
     const pAnnualSim = +pMonthly.reduce((s,m)=>s+m.sM,0).toFixed(6);
-    partialCalc = {partialYr, partialM, monthly:pMonthly, annualBaseline:+fullEst.toFixed(6), annualSim:pAnnualSim};
+    // Total tahunan = fullEst × skenario langsung (SAMA seperti FC), bukan sum
+    // bulanan — karena data aktual riil tidak selalu persis sama dengan proporsi
+    // musiman yang dipakai fullEst, sum bulanan bisa geser sedikit dari FC kalau
+    // dipakai sebagai basis Total.
+    const pAnnualBase = +(fullEst*gMultWI).toFixed(6);
+    partialCalc = {partialYr, partialM, monthly:pMonthly, annualBaseline:pAnnualBase, annualSim:pAnnualSim};
   }
 
   // Simpan hasil untuk restore
@@ -9428,8 +9525,13 @@ function runWhatif(silent){
         // ── Tahun berjalan: Jan..partialM aktual, sisanya proyeksi+simulasi ──
         if(badge) badge.textContent=mc.label+' · '+ruteLabel+' · '+selYear+' (Berjalan)';
         let mrows='';
+        let wiDailyBaseSum=0, wiDailySimSum=0, wiDailyCount=0;
         partialCalc.monthly.forEach(m=>{
           const dM = m.isActual ? 0 : (m.bM>0?((m.sM-m.bM)/m.bM*100):0);
+          const daysInM = new Date(selYear, m.mi+1, 0).getDate();
+          wiDailyBaseSum += m.bM/daysInM;
+          wiDailySimSum  += m.sM/daysInM;
+          wiDailyCount++;
           mrows+=`<tr style="${m.isActual?'':''}">
             <td class="td-b" style="color:${m.isActual?'var(--green2)':'var(--blue2)'}">${m.mn}
               <span style="font-size:8px;color:${m.isActual?'var(--green2)':'var(--amber2)'};font-weight:600">${m.isActual?' ✓ Aktual':' ⚡ Proyeksi'}</span>
@@ -9437,7 +9539,7 @@ function runWhatif(silent){
             <td class="td-r" style="color:var(--t1)">${fmtVal(m.bM,mc.unit)}</td>
             <td class="td-r" style="color:${mc.color};font-weight:700">
               ${fmtVal(m.sM,mc.unit)}
-              ${m.isActual?'<div style="font-size:8px;color:var(--t3)">= aktual</div>':`<div style="font-size:8px;color:var(--t3)">ramp ${(rampUp[0]*100).toFixed(0)}%</div>`}
+              ${m.isActual?'<div style="font-size:8px;color:var(--t3)">= baseline</div>':`<div style="font-size:8px;color:var(--t3)">ramp ${(rampUp[0]*100).toFixed(0)}%</div>`}
             </td>
             <td class="td-r">
               ${m.isActual?'<span style="color:var(--t3);font-size:10px">—</span>'
@@ -9445,14 +9547,22 @@ function runWhatif(silent){
             </td>
           </tr>`;
         });
+        mrows += `<tr style="background:rgba(255,255,255,.02);border-top:2px solid var(--bdr)">
+            <td class="td-b" style="color:var(--t3);font-size:11px">≈ Rata-rata Harian</td>
+            <td class="td-r" style="color:var(--t2);font-size:11px">${fmtVal(wiDailyBaseSum/wiDailyCount,mc.unit)}<span style="color:var(--t3)">/hari</span></td>
+            <td class="td-r" style="color:${mc.color};font-size:11px;opacity:.85">${fmtVal(wiDailySimSum/wiDailyCount,mc.unit)}<span style="color:var(--t3)">/hari</span></td>
+            <td></td>
+          </tr>`;
         tblEl.innerHTML=`<div style="font-size:9px;color:var(--t3);margin-bottom:8px;line-height:1.5">
-            ⚡ ${selYear} — Jan s/d ${MONTHS_SHORT[partialM-1]}: <strong style="color:var(--green2)">Data Aktual</strong> (tidak disimulasikan — sudah terjadi)
+            ⚡ ${selYear} — Jan s/d ${MONTHS_SHORT[partialM-1]}: <strong style="color:var(--green2)">berbasis Data Aktual</strong>
             &nbsp;|&nbsp; ${MONTHS_SHORT[partialM]} s/d Des: <strong style="color:var(--amber2)">Proyeksi musiman kena dampak what-if</strong> (ramp tahun-1, ${(rampUp[0]*100).toFixed(0)}%).
+            <br>Skenario pertumbuhan (${{baseline:'Baseline Normal',pesimis:'Pesimis +1%',moderat:'Moderat +3%',optimis:'Optimis +5%'}[W.growthScenario||'baseline']}) diterapkan ke SEMUA bulan
+            — termasuk Jan-${MONTHS_SHORT[partialM-1]}, mengikuti cara Forecasting Center (samakan persis, tidak dibedakan aktual/proyeksi).
           </div>
           <div style="overflow-x:auto"><table>
           <thead><tr style="background:var(--card2)">
             <th>Bulan</th>
-            <th class="td-r" style="color:var(--t2)">Baseline</th>
+            <th class="td-r" style="color:var(--t2)">Baseline<br><small style="font-weight:400">${ {baseline:"(Normal)",pesimis:"(Pesimis +1%)",moderat:"(Moderat +3%)",optimis:"(Optimis +5%)"}[W.growthScenario||"baseline"] }</small></th>
             <th class="td-r" style="color:${mc.color}">Simulasi</th>
             <th class="td-r">Δ Delta</th>
           </tr></thead>
@@ -9467,9 +9577,13 @@ function runWhatif(silent){
         if(badge) badge.textContent=mc.label+' · '+ruteLabel+' · '+selYear;
 
         let mrows='';
+        let wiDailyBaseSum2=0, wiDailySimSum2=0;
         MONTHS_SHORT.forEach((mn,mi)=>{
           const bM=annualBase*(prop[mi]||1/12), sM=annualSim*(prop[mi]||1/12);
           const dM=bM>0?((sM-bM)/bM*100):0;
+          const daysInM = new Date(selYear, mi+1, 0).getDate();
+          wiDailyBaseSum2 += bM/daysInM;
+          wiDailySimSum2  += sM/daysInM;
           mrows+=`<tr>
             <td class="td-b" style="color:var(--blue2)">${mn}</td>
             <td class="td-r" style="color:var(--t1)">${fmtVal(bM,mc.unit)}</td>
@@ -9477,6 +9591,12 @@ function runWhatif(silent){
             <td class="td-r"><span style="font-weight:700;color:${dM>=0?'var(--green2)':'var(--red2)'}">${dM>=0?'+':''}${dM.toFixed(1)}%</span></td>
           </tr>`;
         });
+        mrows += `<tr style="background:rgba(255,255,255,.02);border-top:2px solid var(--bdr)">
+            <td class="td-b" style="color:var(--t3);font-size:11px">≈ Rata-rata Harian</td>
+            <td class="td-r" style="color:var(--t2);font-size:11px">${fmtVal(wiDailyBaseSum2/12,mc.unit)}<span style="color:var(--t3)">/hari</span></td>
+            <td class="td-r" style="color:${mc.color};font-size:11px;opacity:.85">${fmtVal(wiDailySimSum2/12,mc.unit)}<span style="color:var(--t3)">/hari</span></td>
+            <td></td>
+          </tr>`;
 
         tblEl.innerHTML=`<div style="font-size:9px;color:var(--t3);margin-bottom:8px;line-height:1.5">
             📅 Distribusi bulanan ${selYear} — total tahunan ${selYear} dipecah pakai pola musiman historis (rute: ${ruteLabel}).
@@ -9485,7 +9605,7 @@ function runWhatif(silent){
           <div style="overflow-x:auto"><table>
           <thead><tr style="background:var(--card2)">
             <th>Bulan</th>
-            <th class="td-r" style="color:var(--t2)">Baseline</th>
+            <th class="td-r" style="color:var(--t2)">Baseline<br><small style="font-weight:400">${ {baseline:"(Normal)",pesimis:"(Pesimis +1%)",moderat:"(Moderat +3%)",optimis:"(Optimis +5%)"}[W.growthScenario||"baseline"] }</small></th>
             <th class="td-r" style="color:${mc.color}">Simulasi</th>
             <th class="td-r">Δ Delta</th>
           </tr></thead>
@@ -9541,7 +9661,7 @@ function runWhatif(silent){
       tblEl.innerHTML=`<div style="overflow-x:auto"><table>
         <thead><tr style="background:var(--card2)">
           <th>Tahun</th>
-          <th class="td-r" style="color:var(--t2)">Baseline</th>
+          <th class="td-r" style="color:var(--t2)">Baseline<br><small style="font-weight:400">${ {baseline:"(Normal)",pesimis:"(Pesimis +1%)",moderat:"(Moderat +3%)",optimis:"(Optimis +5%)"}[W.growthScenario||"baseline"] }</small></th>
           <th class="td-r" style="color:${mc.color}">Simulasi</th>
           <th class="td-r">Δ Delta</th>
         </tr></thead>
