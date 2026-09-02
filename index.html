@@ -1329,6 +1329,9 @@ let STATE = {
   dailySelDate: null,  // tanggal yang dipilih untuk proyeksi
   dailySelRute: 'all', // 'all'|'dom'|'int'
   dailyShowUpload: false, // toggle panel upload
+  disruptionEvents: [],   // [{id,type,name,startDate,endDate,impactPct,status,note,createdAt}]
+  disruptionShowPanel: false, // toggle panel kelola event disruption
+  disruptionEditId: null,     // id event yang sedang diedit (null = mode tambah baru)
   selEventKey:    'angleb',
   selEventMetric: 'pax',
   selEventMethod: 'holt-winters',
@@ -3088,6 +3091,366 @@ async function fbLoadDailyData(){
   } catch(e){ console.warn('fbLoadDailyData:', e); }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// DISRUPTION EVENT MANAGER — cuaca buruk, abu vulkanik, shock lain
+// yang menyebabkan pembatalan/penundaan penerbangan di luar pola
+// historis normal. Event dicatat manual oleh tim ops (severity/impact
+// tidak diprediksi otomatis dari cuaca — lihat catatan desain di
+// diskusi ARUNIKA soal volcanic ash vs weather-delay).
+// ═══════════════════════════════════════════════════════════════════
+const DISRUPT_FB_DOC = 'disruption_events';
+const DISRUPT_TYPES = {
+  volcanic_ash: { label:'🌋 Abu Vulkanik',      color:'var(--red2)'   },
+  weather:      { label:'🌧 Cuaca Ekstrem',     color:'var(--amber2)' },
+  policy:       { label:'📋 Kebijakan/Regulasi', color:'var(--blue2)'  },
+  other:        { label:'⚠ Lainnya',            color:'var(--t2)'     },
+};
+
+async function fbPushDisruptionEvents(){
+  if(!FB_DB) return;
+  try {
+    await fbSave(FB_DB.collection('arunika').doc(DISRUPT_FB_DOC), {
+      data: JSON.stringify(STATE.disruptionEvents), _ts: Date.now()
+    });
+  } catch(e){ console.warn('fbPushDisruptionEvents:', e); }
+}
+
+async function fbLoadDisruptionEvents(){
+  if(!FB_DB) return;
+  try {
+    const snap = await FB_DB.collection('arunika').doc(DISRUPT_FB_DOC).get();
+    if(snap.exists){ const d=snap.data(); if(d&&d.data) STATE.disruptionEvents=JSON.parse(d.data); }
+  } catch(e){ console.warn('fbLoadDisruptionEvents:', e); }
+}
+
+// Ambil semua event yang statusnya 'active' dan cakupan tanggalnya meliputi targetDate.
+// endDate kosong/null = event masih berlangsung (ongoing), dianggap mencakup hari ini dan seterusnya.
+function getActiveDisruptionsForDate(targetDate){
+  const t = new Date(targetDate); t.setHours(0,0,0,0);
+  return (STATE.disruptionEvents||[]).filter(ev=>{
+    if(ev.status !== 'active') return false;
+    const start = new Date(ev.startDate+'T00:00:00');
+    if(t < start) return false;
+    if(ev.endDate){
+      const end = new Date(ev.endDate+'T00:00:00');
+      if(t > end) return false;
+    }
+    return true;
+  });
+}
+
+// Gabungkan beberapa event yang overlap secara multiplicative, bukan additive,
+// supaya kombinasi 2 event 50% tidak jadi 100% (habis total) melainkan 75% (1-0.5*0.5).
+function combineDisruptionImpact(events){
+  if(!events || events.length===0) return 0;
+  const survivalFactor = events.reduce((acc,ev)=> acc * (1 - Math.min(Math.max(ev.impactPct,0),100)/100), 1);
+  return +((1 - survivalFactor) * 100).toFixed(1); // dikembalikan sebagai % pengurangan gabungan
+}
+
+function addDisruptionEvent(){
+  const nameEl    = document.getElementById('de-name');
+  const typeEl    = document.getElementById('de-type');
+  const startEl   = document.getElementById('de-start');
+  const endEl     = document.getElementById('de-end');
+  const impactEl  = document.getElementById('de-impact');
+  const noteEl    = document.getElementById('de-note');
+  if(!nameEl || !nameEl.value.trim()){ showToast('Nama event wajib diisi', 'red'); return; }
+  if(!startEl || !startEl.value){ showToast('Tanggal mulai wajib diisi', 'red'); return; }
+  const impactPct = Math.min(Math.max(+impactEl.value||0, 0), 100);
+  if(impactPct <= 0){ showToast('Estimasi dampak (%) harus lebih dari 0', 'red'); return; }
+
+  // Mode edit: perbarui event yang sudah ada, jangan buat baru
+  if(STATE.disruptionEditId){
+    const ev = STATE.disruptionEvents.find(e=>e.id===STATE.disruptionEditId);
+    if(ev){
+      ev.type      = typeEl.value;
+      ev.name      = nameEl.value.trim();
+      ev.startDate = startEl.value;
+      ev.endDate   = endEl.value || null;
+      ev.impactPct = impactPct;
+      ev.note      = (noteEl.value||'').trim();
+      fbPushDisruptionEvents();
+      showToast(`✅ Event "${ev.name}" diperbarui`, 'green');
+      STATE.disruptionEditId = null;
+      showDisruptionPanel(true);
+      buildDailyResult();
+      return;
+    }
+    // event tidak ditemukan (mis. sudah dihapus di tab lain) → lanjut sebagai tambah baru
+    STATE.disruptionEditId = null;
+  }
+
+  const ev = {
+    id: 'de_'+Date.now(),
+    type: typeEl.value,
+    name: nameEl.value.trim(),
+    startDate: startEl.value,
+    endDate: endEl.value || null, // null = masih berlangsung
+    impactPct,
+    status: 'active',
+    note: (noteEl.value||'').trim(),
+    createdAt: Date.now()
+  };
+  STATE.disruptionEvents.push(ev);
+  fbPushDisruptionEvents();
+  showToast(`✅ Event "${ev.name}" ditambahkan`, 'green');
+  showDisruptionPanel(true); // re-render panel (tetap terbuka)
+  buildDailyResult();
+}
+
+// Masuk ke mode edit: isi form dengan data event yang dipilih
+function editDisruptionEvent(id){
+  const ev = STATE.disruptionEvents.find(e=>e.id===id);
+  if(!ev) return;
+  STATE.disruptionEditId = id;
+  showDisruptionPanel(true);
+  const panel = document.getElementById('df-disrupt-panel');
+  if(panel) panel.scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function cancelEditDisruptionEvent(){
+  STATE.disruptionEditId = null;
+  showDisruptionPanel(true);
+}
+
+// Tanggal hari ini dalam format YYYY-MM-DD berdasarkan waktu LOKAL browser
+// (bukan toISOString() yang mengonversi ke UTC — penting untuk WIB/UTC+7
+// supaya tidak mundur satu hari saat dipakai dini hari).
+function todayLocalISO(){
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function endDisruptionEventNow(id){
+  const ev = STATE.disruptionEvents.find(e=>e.id===id);
+  if(!ev) return;
+  ev.endDate = todayLocalISO();
+  ev.status = 'ended';
+  fbPushDisruptionEvents();
+  showToast(`Event "${ev.name}" ditandai selesai`, 'teal');
+  showDisruptionPanel(true);
+  buildDailyResult();
+}
+
+// Reaktifkan event yang sebelumnya ditandai selesai — dipakai saat testing
+// atau saat event ternyata masih/kembali berlangsung, tanpa perlu hapus+buat ulang.
+function reactivateDisruptionEvent(id){
+  const ev = STATE.disruptionEvents.find(e=>e.id===id);
+  if(!ev) return;
+  ev.status = 'active';
+  fbPushDisruptionEvents();
+  showToast(`Event "${ev.name}" diaktifkan kembali`, 'green');
+  showDisruptionPanel(true);
+  buildDailyResult();
+}
+
+function removeDisruptionEvent(id){
+  const ev = STATE.disruptionEvents.find(e=>e.id===id);
+  if(!ev) return;
+  if(!confirm(`Hapus event "${ev.name}"? Tindakan ini tidak bisa dibatalkan.`)) return;
+  STATE.disruptionEvents = STATE.disruptionEvents.filter(e=>e.id!==id);
+  fbPushDisruptionEvents();
+  showToast('Event dihapus', 'teal');
+  showDisruptionPanel(true);
+  buildDailyResult();
+}
+
+// ── Banner peringatan di hasil forecast harian jika ada event aktif ──
+function renderDisruptionBanner(fc){
+  const d = fc.disruption;
+  if(!d || d.impactPct<=0 || d.events.length===0) return '';
+  const chips = d.events.map(ev=>{
+    const t = DISRUPT_TYPES[ev.type]||DISRUPT_TYPES.other;
+    const period = ev.endDate ? `${ev.startDate} s/d ${ev.endDate}` : `${ev.startDate} — masih berlangsung`;
+    return `<div style="display:inline-flex;align-items:center;gap:6px;background:rgba(239,68,68,.08);
+                border:1px solid rgba(239,68,68,.25);border-radius:7px;padding:4px 10px;font-size:11px;margin:2px">
+      <strong style="color:${t.color}">${t.label}</strong>
+      <span style="color:var(--t2)">${ev.name}</span>
+      <span style="color:var(--t3)">(-${ev.impactPct}% · ${period})</span>
+    </div>`;
+  }).join('');
+  return `
+  <div class="card" style="margin-bottom:12px;border:1px solid rgba(239,68,68,.35);background:rgba(239,68,68,.05)">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="font-size:18px">⚠️</span>
+      <span style="font-size:13px;font-weight:800;color:var(--red2)">Forecast Disesuaikan Karena Disruption Event</span>
+      <span style="margin-left:auto;font-size:12px;font-weight:700;color:var(--red2)">Dampak gabungan: -${d.impactPct}%</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap">${chips}</div>
+    <div style="font-size:10px;color:var(--t3);margin-top:8px">
+      Angka di bawah adalah <strong>estimasi setelah penyesuaian</strong>. Nilai baseline (pola historis normal)
+      ditampilkan dicoret untuk perbandingan. Kelola event di panel <strong>⚠ Disruption Event</strong>.
+    </div>
+  </div>`;
+}
+
+// ── Diagnostik: kenapa event TIDAK diterapkan ke tanggal ini ────────
+// Muncul otomatis kalau ada event tercatat di sistem tapi tidak satupun
+// yang berlaku untuk tanggal forecast yang sedang dilihat — supaya
+// mismatch (status/tanggal salah) langsung kelihatan tanpa buka console.
+function renderDisruptionDiagnostic(fc){
+  const all = STATE.disruptionEvents||[];
+  if(all.length===0) return '';
+  if(fc.disruption && fc.disruption.impactPct>0) return ''; // sudah diterapkan, banner lain yang tampil
+
+  const t = new Date(fc.date); t.setHours(0,0,0,0);
+  const isoTarget = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+
+  const rows = all.map(ev=>{
+    let reason;
+    if(ev.status !== 'active'){
+      reason = 'Status: SELESAI — tidak diterapkan ke forecast manapun. Hapus lalu tambahkan ulang jika ingin mengaktifkan kembali.';
+    } else {
+      const start = new Date(ev.startDate+'T00:00:00');
+      const end   = ev.endDate ? new Date(ev.endDate+'T00:00:00') : null;
+      if(t < start){
+        reason = `Tanggal forecast (${isoTarget}) masih sebelum tanggal mulai event (${ev.startDate}).`;
+      } else if(end && t > end){
+        reason = `Tanggal forecast (${isoTarget}) sudah melewati tanggal selesai event (${ev.endDate}).`;
+      } else {
+        reason = 'Status AKTIF dan tanggal cocok — seharusnya diterapkan. Jika tetap tidak muncul, ini kemungkinan bug; laporkan beserta detail event ini.';
+      }
+    }
+    const typeInfo = DISRUPT_TYPES[ev.type]||DISRUPT_TYPES.other;
+    return `<div style="padding:7px 10px;border:1px solid var(--bdr);border-radius:7px;margin-bottom:5px;background:var(--card2)">
+      <div style="font-size:11px;font-weight:700;color:var(--t1)">${typeInfo.label} · ${ev.name}
+        <span style="font-size:10px;font-weight:600;color:var(--t3)">(status: ${ev.status})</span>
+      </div>
+      <div style="font-size:10px;color:var(--t3);margin-top:2px">Rentang: ${ev.startDate} s/d ${ev.endDate||'ongoing'} · Dampak: -${ev.impactPct}%</div>
+      <div style="font-size:10px;color:var(--amber2);margin-top:3px">↳ ${reason}</div>
+    </div>`;
+  }).join('');
+
+  return `
+  <div class="card" style="margin-bottom:12px;border:1px solid rgba(245,158,11,.3);background:rgba(245,158,11,.05)">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="font-size:16px">ℹ️</span>
+      <span style="font-size:12px;font-weight:800;color:var(--amber2)">
+        Ada ${all.length} event tercatat, tapi tidak ada yang berlaku untuk tanggal ${isoTarget}
+      </span>
+    </div>
+    ${rows}
+  </div>`;
+}
+
+// ── Panel Kelola Disruption Event (toggle, mirip panel upload) ──────
+function showDisruptionPanel(forceOpen){
+  const panel = document.getElementById('df-disrupt-panel');
+  if(!panel) return;
+
+  if(!forceOpen && panel.style.display === 'block'){
+    panel.style.display = 'none';
+    return;
+  }
+
+  const typeOptions = Object.entries(DISRUPT_TYPES).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('');
+  const today = todayLocalISO();
+
+  // Jika sedang mode edit, ambil data event untuk prefill form
+  const editEv = STATE.disruptionEditId
+    ? (STATE.disruptionEvents||[]).find(e=>e.id===STATE.disruptionEditId)
+    : null;
+  if(STATE.disruptionEditId && !editEv) STATE.disruptionEditId = null; // event sudah tidak ada, batalkan mode edit
+
+  const list = (STATE.disruptionEvents||[]).slice().sort((a,b)=>b.createdAt-a.createdAt).map(ev=>{
+    const t = DISRUPT_TYPES[ev.type]||DISRUPT_TYPES.other;
+    const period = ev.endDate ? `${ev.startDate} s/d ${ev.endDate}` : `${ev.startDate} — ongoing`;
+    const statusColor = ev.status==='active' ? 'var(--green2)' : 'var(--t3)';
+    const isEditing = STATE.disruptionEditId === ev.id;
+    return `
+    <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid ${isEditing?'var(--amber2)':'var(--bdr)'};
+                border-radius:8px;margin-bottom:6px;background:${isEditing?'rgba(245,158,11,.06)':'var(--card2)'}">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:700;color:var(--t1)">${t.label} · ${ev.name}
+          <span style="font-size:10px;font-weight:600;color:${statusColor}">(${ev.status==='active'?'AKTIF':'SELESAI'})</span>
+          ${isEditing?'<span style="font-size:10px;font-weight:600;color:var(--amber2)">· sedang diedit</span>':''}
+        </div>
+        <div style="font-size:10px;color:var(--t3);margin-top:2px">${period} · Dampak: -${ev.impactPct}%${ev.note?' · '+ev.note:''}</div>
+      </div>
+      <button onclick="editDisruptionEvent('${ev.id}')"
+        style="background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.3);border-radius:6px;padding:5px 10px;
+               font-size:10px;color:var(--blue2);cursor:pointer;font-weight:600;white-space:nowrap">✏️ Edit</button>
+      ${ev.status==='active'?`<button onclick="endDisruptionEventNow('${ev.id}')"
+        style="background:var(--card);border:1px solid var(--bdr2);border-radius:6px;padding:5px 10px;
+               font-size:10px;color:var(--teal2);cursor:pointer;font-weight:600;white-space:nowrap">✓ Tandai Selesai</button>`
+      :`<button onclick="reactivateDisruptionEvent('${ev.id}')"
+        style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.3);border-radius:6px;padding:5px 10px;
+               font-size:10px;color:var(--green2);cursor:pointer;font-weight:600;white-space:nowrap">🔄 Reaktifkan</button>`}
+      <button onclick="removeDisruptionEvent('${ev.id}')"
+        style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:6px;padding:5px 10px;
+               font-size:10px;color:var(--red2);cursor:pointer;font-weight:600">🗑</button>
+    </div>`;
+  }).join('') || `<div style="font-size:11px;color:var(--t3);padding:10px;text-align:center">Belum ada event tercatat.</div>`;
+
+  panel.innerHTML = `
+  <div class="card" style="border:1px solid rgba(239,68,68,.3)">
+    <div class="card-hdr">
+      <span class="card-title" style="color:var(--red2)">⚠ Kelola Disruption Event</span>
+      <button onclick="document.getElementById('df-disrupt-panel').style.display='none'"
+        style="background:none;border:none;color:var(--t3);cursor:pointer;font-size:13px">✕</button>
+    </div>
+    <div style="font-size:11px;color:var(--t3);margin-bottom:14px;line-height:1.7;
+                padding:10px;background:rgba(255,255,255,.02);border-radius:7px;border:1px solid var(--bdr)">
+      Catat kejadian yang mengganggu operasional normal (abu vulkanik, cuaca ekstrem, kebijakan, dll).
+      Forecast harian pada tanggal yang tercakup event <strong>aktif</strong> akan otomatis disesuaikan
+      sebesar estimasi dampak (%). Beberapa event yang tumpang tindih digabung secara multiplikatif.
+    </div>
+
+    ${editEv?`<div style="font-size:11px;font-weight:700;color:var(--amber2);margin-bottom:8px">
+      ✏️ Mengedit: ${editEv.name}
+    </div>`:''}
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+      <div>
+        <div style="font-size:10px;color:var(--t3);margin-bottom:3px">Jenis Event</div>
+        <select id="de-type" style="width:100%;background:var(--card2);border:1px solid var(--bdr);border-radius:6px;padding:6px 8px;font-size:12px;color:var(--t1)">
+          ${Object.entries(DISRUPT_TYPES).map(([k,v])=>`<option value="${k}" ${editEv&&editEv.type===k?'selected':''}>${v.label}</option>`).join('')}
+        </select>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--t3);margin-bottom:3px">Nama Event</div>
+        <input id="de-name" type="text" placeholder="Erupsi Sinabung" value="${editEv?editEv.name.replace(/"/g,'&quot;'):''}"
+          style="width:100%;background:var(--card2);border:1px solid var(--bdr);border-radius:6px;padding:6px 8px;font-size:12px;color:var(--t1)">
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--t3);margin-bottom:3px">Tanggal Mulai</div>
+        <input id="de-start" type="date" value="${editEv?editEv.startDate:today}"
+          style="width:100%;background:var(--card2);border:1px solid var(--bdr);border-radius:6px;padding:6px 8px;font-size:12px;color:var(--t1)">
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--t3);margin-bottom:3px">Tanggal Selesai (kosongkan jika masih berlangsung)</div>
+        <input id="de-end" type="date" value="${editEv&&editEv.endDate?editEv.endDate:''}"
+          style="width:100%;background:var(--card2);border:1px solid var(--bdr);border-radius:6px;padding:6px 8px;font-size:12px;color:var(--t1)">
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--t3);margin-bottom:3px">Estimasi Dampak (% flight/pax/cargo berkurang)</div>
+        <input id="de-impact" type="number" min="1" max="100" value="${editEv?editEv.impactPct:20}"
+          style="width:100%;background:var(--card2);border:1px solid var(--bdr);border-radius:6px;padding:6px 8px;font-size:12px;color:var(--t1)">
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--t3);margin-bottom:3px">Catatan (opsional)</div>
+        <input id="de-note" type="text" placeholder="mis. sumber: NOTAM / PVMBG" value="${editEv&&editEv.note?editEv.note.replace(/"/g,'&quot;'):''}"
+          style="width:100%;background:var(--card2);border:1px solid var(--bdr);border-radius:6px;padding:6px 8px;font-size:12px;color:var(--t1)">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:16px">
+      <button onclick="addDisruptionEvent()"
+        style="background:linear-gradient(135deg,${editEv?'var(--blue2),#2563eb':'var(--red2),#dc2626'});color:#fff;border:none;border-radius:7px;
+               padding:8px 18px;font-size:12px;font-weight:700;cursor:pointer">
+        ${editEv?'💾 Simpan Perubahan':'➕ Tambah Event'}
+      </button>
+      ${editEv?`<button onclick="cancelEditDisruptionEvent()"
+        style="background:var(--card2);border:1px solid var(--bdr2);border-radius:7px;padding:8px 18px;
+               font-size:12px;color:var(--t2);cursor:pointer;font-weight:600">Batal</button>`:''}
+    </div>
+
+    <div style="font-size:11px;color:var(--t3);font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">Riwayat Event</div>
+    ${list}
+  </div>`;
+
+  panel.style.display = 'block';
+}
+
 // ── Parser Excel harian ─────────────────────────────────────────────
 async function parseDailyExcel(file){
   return new Promise((resolve, reject) => {
@@ -3231,12 +3594,44 @@ function calcDailyForecast(targetDate){
                  : rute==='dom' ? dom.n
                  : Math.min(dom.n, int_.n);
 
+  // ── Terapkan Disruption Event (jika ada) ───────────────────────
+  // Baseline = hasil pola historis murni (di atas). Jika ada event
+  // aktif yang mencakup targetDate, forecast disesuaikan (dikurangi)
+  // sebesar impact gabungan, ditampilkan berdampingan dengan baseline
+  // agar transparan — bukan menimpa angka historis.
+  const activeEvents = getActiveDisruptionsForDate(targetDate);
+  const impactPct = combineDisruptionImpact(activeEvents);
+  const factor = 1 - impactPct/100;
+
+  const baselineTotal = { flight:totalF, pax:totalP, cargo:totalC, domPax:totalDomPax, intPax:totalIntPax };
+  const adjHourly = hourly.map(h=>({
+    ...h,
+    flight: Math.round(h.flight*factor),
+    pax:    Math.round(h.pax*factor),
+    cargo:  +(h.cargo*factor).toFixed(2),
+    domPax: Math.round((h.domPax||0)*factor),
+    intPax: Math.round((h.intPax||0)*factor),
+  }));
+  const adjTotal = impactPct>0 ? {
+    flight: Math.round(totalF*factor),
+    pax:    Math.round(totalP*factor),
+    cargo:  +(totalC*factor).toFixed(1),
+    domPax: Math.round(totalDomPax*factor),
+    intPax: Math.round(totalIntPax*factor),
+  } : baselineTotal;
+
+  const finalHourly = impactPct>0 ? adjHourly : hourly;
+  const finalPeakFlight = impactPct>0 ? finalHourly.reduce((mx,h)=>h.flight>mx.flight?h:mx, finalHourly[0]) : peakFlight;
+  const finalPeakPax    = impactPct>0 ? finalHourly.reduce((mx,h)=>h.pax>mx.pax?h:mx, finalHourly[0])       : peakPax;
+
   return {
     error: null, date:targetDate, rute, dataSource, dowName,
-    total:{ flight:totalF, pax:totalP, cargo:totalC, domPax:totalDomPax, intPax:totalIntPax },
-    hourly, peakFlight, peakPax,
+    total: adjTotal, baselineTotal,
+    hourly: finalHourly,
+    peakFlight: finalPeakFlight, peakPax: finalPeakPax,
     nSamples, daysInMon,
-    domN: dom?.n || 0, intN: int_?.n || 0
+    domN: dom?.n || 0, intN: int_?.n || 0,
+    disruption: { events: activeEvents, impactPct }
   };
 }
 
@@ -3247,6 +3642,7 @@ function dailyForecast(){
   if(!STATE.dailySelRute) STATE.dailySelRute = 'all';
   const rute    = STATE.dailySelRute;
   const hasData = Object.keys(STATE.dailyData).length > 0;
+  const activeDisruptCount = (STATE.disruptionEvents||[]).filter(e=>e.status==='active').length;
 
   // Ringkasan data tersedia
   const dataChips = [];
@@ -3286,6 +3682,12 @@ function dailyForecast(){
       📊 Proyeksikan
     </button>
     <div style="margin-left:auto;display:flex;gap:8px">
+      <button onclick="showDisruptionPanel()"
+        style="background:${activeDisruptCount>0?'rgba(239,68,68,.12)':'var(--card2)'};
+               border:1px solid ${activeDisruptCount>0?'rgba(239,68,68,.35)':'var(--bdr2)'};border-radius:7px;
+               padding:6px 14px;font-size:11px;color:var(--red2);cursor:pointer;font-weight:600">
+        ⚠ Disruption Event${activeDisruptCount>0?` (${activeDisruptCount} aktif)`:''}
+      </button>
       <button onclick="showDailyUploadPanel()"
         style="background:var(--card2);border:1px solid var(--bdr2);border-radius:7px;
                padding:6px 14px;font-size:11px;color:var(--blue2);cursor:pointer;font-weight:600">
@@ -3314,6 +3716,9 @@ function dailyForecast(){
     </div>`).join('')}
   </div>`:''}
 
+  <!-- Panel Disruption Event (tersembunyi, toggle via tombol) -->
+  <div id="df-disrupt-panel" style="display:none;margin-bottom:14px"></div>
+
   <!-- Panel Upload (tersembunyi, toggle via tombol) -->
   <div id="df-upload-panel" style="display:none;margin-bottom:14px"></div>
 
@@ -3327,6 +3732,15 @@ function dailyForecast(){
   if(!hasData){
     fbLoadDailyData().then(()=>{
       if(Object.keys(STATE.dailyData).length>0) dailyForecast();
+    });
+  }
+
+  // Load disruption events dari Firestore jika belum ada di state lokal
+  if((STATE.disruptionEvents||[]).length===0){
+    fbLoadDisruptionEvents().then(()=>{
+      if((STATE.disruptionEvents||[]).length>0){
+        buildDailyResult();
+      }
     });
   }
 }
@@ -3683,22 +4097,28 @@ function buildDailyResult(){
       </div>
     </div>
 
+    ${renderDisruptionBanner(fc)}
+    ${renderDisruptionDiagnostic(fc)}
+
     <div class="g3" style="margin-bottom:12px">
       <div class="card" style="text-align:center;border:1px solid rgba(59,130,246,.15)">
         <div style="font-size:10px;color:var(--t3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">✈ Total Flight</div>
         <div style="font-size:28px;font-weight:900;color:var(--blue2)">${fc.total.flight.toLocaleString('id-ID')}</div>
+        ${fc.disruption.impactPct>0?`<div style="font-size:11px;color:var(--t3);text-decoration:line-through;margin-top:2px">Baseline: ${fc.baselineTotal.flight.toLocaleString('id-ID')}</div>`:''}
         <div style="font-size:10px;color:var(--t3);margin-top:2px">gerakan/hari</div>
         <div style="font-size:10px;color:var(--t2);margin-top:8px;padding-top:8px;border-top:1px solid var(--bdr)">Peak: <strong>${fc.peakFlight.jam}</strong> (~${fc.peakFlight.flight} gerakan)</div>
       </div>
       <div class="card" style="text-align:center;border:1px solid rgba(34,197,94,.15)">
         <div style="font-size:10px;color:var(--t3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">👤 Total Penumpang</div>
         <div style="font-size:28px;font-weight:900;color:var(--green2)">${fc.total.pax.toLocaleString('id-ID')}</div>
+        ${fc.disruption.impactPct>0?`<div style="font-size:11px;color:var(--t3);text-decoration:line-through;margin-top:2px">Baseline: ${fc.baselineTotal.pax.toLocaleString('id-ID')}</div>`:''}
         <div style="font-size:10px;color:var(--t3);margin-top:2px">orang/hari</div>
         <div style="font-size:10px;color:var(--t2);margin-top:8px;padding-top:8px;border-top:1px solid var(--bdr)">Peak: <strong>${fc.peakPax.jam}</strong> (~${fc.peakPax.pax.toLocaleString('id-ID')} pax)</div>
       </div>
       <div class="card" style="text-align:center;border:1px solid rgba(245,158,11,.15)">
         <div style="font-size:10px;color:var(--t3);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">📦 Kargo</div>
         <div style="font-size:28px;font-weight:900;color:var(--amber2)">${fc.total.cargo.toLocaleString('id-ID',{minimumFractionDigits:1,maximumFractionDigits:1})}</div>
+        ${fc.disruption.impactPct>0?`<div style="font-size:11px;color:var(--t3);text-decoration:line-through;margin-top:2px">Baseline: ${fc.baselineTotal.cargo.toLocaleString('id-ID',{minimumFractionDigits:1,maximumFractionDigits:1})}</div>`:''}
         <div style="font-size:10px;color:var(--t3);margin-top:2px">ton/hari</div>
         <div style="font-size:10px;color:var(--t2);margin-top:8px;padding-top:8px;border-top:1px solid var(--bdr)">Dari pola historis</div>
       </div>
